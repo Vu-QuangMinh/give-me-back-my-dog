@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://4mp1o8itshru"]
+
+[ext_resource type="Script" uid="uid://caopwjgyonoch" path="res://grunt.gd" id="1_dwcme"]
+[ext_resource type="Texture2D" uid="uid://dcipkvgns7abd" path="res://spritesheet.png" id="1_qhj84"]
+
+[node name="Sprite2D" type="Sprite2D" unique_id=1264436527]
+texture = ExtResource("1_qhj84")
+region_enabled = true
+region_rect = Rect2(193, 1.5, 45, 51)
+script = ExtResource("1_dwcme")

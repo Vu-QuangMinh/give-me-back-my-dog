@@ -1,0 +1,235 @@
+extends Node2D
+
+# ═══════════════════════════════════════════════════════════════════
+#  CHARACTER PRESETS
+#  ► All per-character tuning lives here.
+#  ► Add / change characters without touching main.gd.
+#  ► PLAYER_ORDER controls spawn sequence (index 0 = first to act).
+# ═══════════════════════════════════════════════════════════════════
+
+const PLAYER_ORDER : Array = ["Sonny", "Mike"]
+
+const CHARACTER_PRESETS : Dictionary = {
+	"Sonny": {
+		"max_hp":           4,       # starting / max HP
+		"equipped":         "pan",   # weapon key (see WEAPONS below)
+		"spawn_col":        5,       # grid column at combat start
+		"spawn_row":        1,       # grid row at combat start
+		"move_range":       2,       # BFS tiles per move action
+		"actions_per_turn": 2,       # actions available each turn
+		"uses_draw_shot":   false,   # set true to use Mike's aim/drag flow
+	},
+	"Mike": {
+		"max_hp":           3,
+		"equipped":         "slingshot",
+		"spawn_col":        6,
+		"spawn_row":        1,
+		"move_range":       2,
+		"actions_per_turn": 2,
+		"uses_draw_shot":   true,
+	},
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  WEAPON DEFINITIONS
+#  ► All attack tuning lives here.
+#  ► Keys used by main.gd: q_name, q_desc, q_dmg, q_mode, q_effect,
+#    q_range (ranged only), bounce_count (draw_shot only).
+# ═══════════════════════════════════════════════════════════════════
+
+const WEAPONS : Dictionary = {
+	"sword": {
+		"q_name":   "Swing",               "q_desc":   "3 adj tiles, 1 dmg",
+		"w_name":   "Thrust",              "w_desc":   "1 adj tile, 2 dmg",
+		"q_dmg":    1,                     "w_dmg":    2,
+		"q_mode":   "crescent",            "w_mode":   "single",
+		"q_effect": "",                    "w_effect": "",
+	},
+	"hammer": {
+		"q_name":   "Bash",                "q_desc":   "1 adj tile, 1 dmg + push 1",
+		"w_name":   "Crush",               "w_desc":   "1 dmg to target + adj tiles",
+		"q_dmg":    1,                     "w_dmg":    1,
+		"q_mode":   "single",              "w_mode":   "area",
+		"q_effect": "push1",               "w_effect": "crush_area",
+	},
+	"unarmed": {
+		"q_name":   "Punch",               "q_desc":   "1 adj tile, 1 dmg",
+		"w_name":   "Push",                "w_desc":   "1 adj tile, push 1",
+		"q_dmg":    1,                     "w_dmg":    0,
+		"q_mode":   "single",              "w_mode":   "single",
+		"q_effect": "",                    "w_effect": "push1",
+	},
+	"pan": {
+		"q_name":   "Boong",               "q_desc":   "hold to charge, 1+dmg + push 1",
+		"w_name":   "Bomb",                "w_desc":   "adj tile, 2 dmg AOE (1/floor)",
+		"q_dmg":    1,                     "w_dmg":    0,
+		"q_mode":   "charge_bar",          "w_mode":   "bomb",
+		"q_effect": "push1",               "w_effect": "",
+	},
+	"slingshot": {
+		"q_name":       "Draw Shot",
+		"q_desc":       "aim+drag timing, 1 dmg, 1 bounce",
+		"w_name":       "Grapple",         "w_desc":   "pull enemy to you or be pulled (2/floor)",
+		"q_dmg":        1,                 "w_dmg":    1,
+		"q_mode":       "draw_shot",       "w_mode":   "grapple",
+		"q_effect":     "",                "w_effect": "",
+		"bounce_count": 1,     # ← tune ricochets here; picked up by BounceTracer
+	},
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  GRID POSITION
+# ═══════════════════════════════════════════════════════════════════
+
+var grid_col : int = 5
+var grid_row : int = 4
+
+# ═══════════════════════════════════════════════════════════════════
+#  INSTANCE CONFIG  (written by setup_from_preset)
+# ═══════════════════════════════════════════════════════════════════
+
+var character_name    : String = ""
+var move_range        : int    = 2
+var actions_per_turn  : int    = 2
+var uses_draw_shot    : bool   = false
+
+# ═══════════════════════════════════════════════════════════════════
+#  COMBAT STATS
+# ═══════════════════════════════════════════════════════════════════
+
+var hp      : int = 4
+var max_hp  : int = 4
+var armor   : int = 0
+
+var perfection     : int = 0
+var perfection_cap : int = 10   # doubled by Too Easy passive
+
+var actions_left  : int  = 2
+var disarmed      : bool = false
+var floor_cleared : bool = false
+
+var tiles_traveled_this_turn : int   = 0
+var swift_kill_count         : int   = 0
+var passives                 : Array = []
+var equipped                 : String = "sword"
+
+# ═══════════════════════════════════════════════════════════════════
+#  NODES
+# ═══════════════════════════════════════════════════════════════════
+
+var armor_ring : Line2D = null
+var name_label : Label  = null
+
+func _ready() -> void:
+	name_label = Label.new()
+	add_child(name_label)
+	name_label.text                   = character_name if character_name != "" else "Player"
+	name_label.position               = Vector2(-20, -30)
+	name_label.horizontal_alignment   = HORIZONTAL_ALIGNMENT_CENTER
+	_build_armor_ring()
+
+func _draw() -> void:
+	draw_circle(Vector2.ZERO, 15, Color.BLUE)
+
+func _build_armor_ring() -> void:
+	armor_ring               = Line2D.new()
+	armor_ring.width         = 3.0
+	armor_ring.default_color = Color(0.39, 0.71, 1.0, 0.9)
+	armor_ring.closed        = true
+	var pts = PackedVector2Array()
+	for i in range(24):
+		var angle = deg_to_rad(360.0 / 24.0 * i)
+		pts.append(Vector2(cos(angle), sin(angle)) * 28.0)
+	armor_ring.points  = pts
+	armor_ring.visible = false
+	add_child(armor_ring)
+
+func refresh_visuals() -> void:
+	if armor_ring:
+		armor_ring.visible = armor > 0
+
+# ═══════════════════════════════════════════════════════════════════
+#  PRESET SETUP
+# ═══════════════════════════════════════════════════════════════════
+
+## Call this right after instantiation to apply a CHARACTER_PRESETS entry.
+func setup_from_preset(preset_name: String) -> void:
+	var p             = CHARACTER_PRESETS[preset_name]
+	character_name    = preset_name
+	max_hp            = p["max_hp"]
+	hp                = p["max_hp"]
+	equipped          = p["equipped"]
+	grid_col          = p["spawn_col"]
+	grid_row          = p["spawn_row"]
+	move_range        = p["move_range"]
+	actions_per_turn  = p["actions_per_turn"]
+	actions_left      = p["actions_per_turn"]
+	uses_draw_shot    = p["uses_draw_shot"]
+	if name_label:
+		name_label.text = preset_name
+
+# ═══════════════════════════════════════════════════════════════════
+#  TURN MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════
+
+func reset_turn() -> void:
+	actions_left             = actions_per_turn   # ← uses per-character value
+	armor                    = 0
+	disarmed                 = false
+	tiles_traveled_this_turn = 0
+	refresh_visuals()
+
+func use_action() -> void:
+	if not floor_cleared:
+		actions_left -= 1
+
+func can_act() -> bool:
+	return actions_left > 0 or floor_cleared
+
+# ═══════════════════════════════════════════════════════════════════
+#  DAMAGE / HEALING
+# ═══════════════════════════════════════════════════════════════════
+
+func take_damage(dmg: int) -> int:
+	var absorbed = mini(armor, dmg)
+	armor        = maxi(0, armor - dmg)
+	var real_dmg = dmg - absorbed
+	hp           = maxi(0, hp - real_dmg)
+	if real_dmg > 0:
+		perfection = 0
+	refresh_visuals()
+	return real_dmg
+
+func heal(amount: int) -> void:
+	hp = mini(hp + amount, max_hp)
+
+func is_dead() -> bool:
+	return hp <= 0
+
+# ═══════════════════════════════════════════════════════════════════
+#  WEAPON HELPERS
+# ═══════════════════════════════════════════════════════════════════
+
+func get_weapon_data() -> Dictionary:
+	return WEAPONS.get(equipped, WEAPONS["unarmed"])
+
+func get_q_dmg()        -> int:    return get_weapon_data().get("q_dmg", 1)
+func get_w_dmg()        -> int:    return get_weapon_data().get("w_dmg", 1)
+func get_q_mode()       -> String: return get_weapon_data().get("q_mode", "single")
+func get_w_mode()       -> String: return get_weapon_data().get("w_mode", "single")
+func get_q_effect()     -> String: return get_weapon_data().get("q_effect", "")
+func get_w_effect()     -> String: return get_weapon_data().get("w_effect", "")
+func get_bounce_count() -> int:    return get_weapon_data().get("bounce_count", 0)
+
+# ═══════════════════════════════════════════════════════════════════
+#  PASSIVE HELPERS
+# ═══════════════════════════════════════════════════════════════════
+
+func has_passive(p_name: String) -> bool:
+	return p_name in passives
+
+func add_passive(p_name: String) -> void:
+	if not has_passive(p_name):
+		passives.append(p_name)
+		match p_name:
+			"too_easy": perfection_cap = 20

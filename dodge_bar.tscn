@@ -1,0 +1,20 @@
+[gd_scene format=3 uid="uid://by52agktocfd1"]
+
+[ext_resource type="Script" uid="uid://s4lj527iq0u4" path="res://dodge_bar.gd" id="1_kr87c"]
+
+[node name="DodgeBar" type="Node2D" unique_id=549164616]
+script = ExtResource("1_kr87c")
+
+[node name="HintLabel" type="Label" parent="." unique_id=1918689444]
+offset_left = -65.0
+offset_top = -36.0
+offset_right = 59.0
+offset_bottom = -13.0
+text = "Space to Dodge!"
+horizontal_alignment = 1
+
+[node name="ResultLabel" type="Label" parent="." unique_id=2015398073]
+offset_left = -130.0
+offset_top = -88.0
+offset_right = -90.0
+offset_bottom = -65.0

@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://kpwqekvdycho"]
+
+[ext_resource type="Script" uid="uid://chvmsfpnq4c2s" path="res://hextile.gd" id="1_tqxos"]
+
+[node name="Hextile" type="Polygon2D" unique_id=780209890]
+script = ExtResource("1_tqxos")
