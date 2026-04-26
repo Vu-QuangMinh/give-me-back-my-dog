@@ -140,13 +140,14 @@ var attacks : Array = []
 #  RUNTIME STATE
 # ═══════════════════════════════════════════════════════════════════
 
-var hp             : int   = 0
-var grid_col       : int   = 0
-var grid_row       : int   = 0
-var dodge_line     : float = 0.0
-var bleed_stacks   : int   = 0
-var disarmed_turns : int   = 0
-var attack_index   : int   = 0   # cycles through attacks[] each action
+var hp                    : int   = 0
+var grid_col              : int   = 0
+var grid_row              : int   = 0
+var dodge_line            : float = 0.0
+var bleed_stacks          : int   = 0
+var disarmed_turns        : int   = 0
+var attack_index          : int   = 0   # cycles through attacks[] each action
+var has_attacked_this_turn : bool  = false
 
 # ═══════════════════════════════════════════════════════════════════
 #  VISUALS

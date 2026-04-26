@@ -46,6 +46,12 @@ var phase        : Phase = Phase.PLAYER_TURN
 var action_queue : Array = []
 var action_timer : float = 0.0
 var floor_cleared : bool = false
+var enemy_turn_transition_timer  : float = -1.0
+var players_turned_this_round    : Array = []
+
+var attack_committed_this_round : bool       = false
+var reset_turn_used             : bool       = false
+var turn_snapshot               : Dictionary = {}
 
 var attack_mode  : String = ""
 var attack_tiles : Array  = []
@@ -100,6 +106,8 @@ var q_box_label   : Label = null
 var turn_label    : Label = null
 var dead_label    : Label = null
 var timer_label   : Label = null
+var undo_label    : Label = null
+var reset_label   : Label = null
 
 var minutes_left  : int   = 180
 
@@ -118,6 +126,7 @@ func _ready() -> void:
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
+	_save_turn_snapshot()
 	# Overlay drawn above all other nodes
 	aim_overlay = Node2D.new()
 	aim_overlay.set_script(AimOverlayScript)
@@ -444,6 +453,8 @@ func _execute_attack(mode: String, hit_type: String) -> void:
 		var to_world     = _hex_to_pixel(target_tile.x, target_tile.y) + offset
 		var dir          = (to_world - from_world).normalized()
 
+		attack_committed_this_round = true
+		current_player.has_attacked = true
 		current_player.use_action()
 		attack_mode  = ""
 		attack_tiles = []
@@ -461,18 +472,18 @@ func _execute_attack(mode: String, hit_type: String) -> void:
 		var dmg = _calculate_damage(base_dmg, hit_type, target)
 		_deal_damage_to_enemy(target, dmg, effect)
 
+	attack_committed_this_round = true
+	current_player.has_attacked = true
 	current_player.use_action()
 	attack_mode  = ""
 	attack_tiles = []
+	phase = Phase.PLAYER_TURN
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
 
 	if enemies.is_empty():
 		_on_floor_cleared()
-		return
-
-	_end_player_turn()
 
 func _deal_damage_to_enemy(enemy: Node, dmg: int, effect: String) -> void:
 	match effect:
@@ -538,11 +549,10 @@ func _finalize_ranged_turn(player_idx: int) -> void:
 	if enemies.is_empty():
 		_on_floor_cleared()
 		return
+	current_player_index = player_idx
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
-	current_player_index = player_idx
-	_end_player_turn()
 
 # ── Mike's Draw Shot ──────────────────────────────────────────────────────────
 
@@ -559,10 +569,10 @@ func _make_tracer() -> BounceTracer:
 	t.bounds           = grid_pixel_bounds
 	t.columns          = column_tiles
 	t.entities         = _build_entity_map()
-	t.launch_speed     = PROJ_LAUNCH_SPEED
-	t.decay_rate       = PROJ_DECAY_RATE
-	t.min_speed        = PROJ_MIN_SPEED
-	t.negative_bounce  = PROJ_NEGATIVE_BOUNCE
+	t.launch_speed     = CURRENT_PROJ_LAUNCH_SPEED
+	t.decay_rate       = CURRENT_PROJ_DECAY_RATE
+	t.min_speed        = CURRENT_PROJ_LAUNCH_SPEED * 0.03
+	t.negative_bounce  = CURRENT_PROJ_NEGATIVE_BOUNCE
 	t.hex_to_pixel     = func(c: int, r: int) -> Vector2:
 		return _hex_to_pixel(c, r) + _grid_center_offset()
 	t.pixel_to_hex     = _pixel_to_hex
@@ -613,6 +623,8 @@ func _on_mike_timing_resolved(result: String) -> void:
 				players[captured_idx].perfection + 1,
 				players[captured_idx].perfection_cap)
 
+	attack_committed_this_round = true
+	players[captured_idx].has_attacked = true
 	players[captured_idx].use_action()
 
 	if result == "miss":
@@ -679,25 +691,26 @@ func _on_sonny_charge_resolved(result: String) -> void:
 			_spawn_float_text(cur.position + Vector2(0, -50), "BOONG!", Color(0.9, 0.85, 0.3))
 			_do_charge_hit(sonny_charge_target, dmg)
 		"miss":
+			attack_committed_this_round = true
+			cur.has_attacked = true
 			cur.use_action()
 			_spawn_float_text(cur.position + Vector2(0, -50), "MISS!", Color(0.9, 0.4, 0.4))
 			_update_valid_moves()
 			_refresh_tile_colors()
 			_refresh_ui()
-			_end_player_turn()
 
 func _do_charge_hit(target_tile: Vector2i, dmg: int) -> void:
 	var target = _get_enemy_at(target_tile)
 	if target:
 		_deal_damage_to_enemy(target, dmg, "push1")
+	attack_committed_this_round = true
+	players[current_player_index].has_attacked = true
 	players[current_player_index].use_action()
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
 	if enemies.is_empty():
 		_on_floor_cleared()
-		return
-	_end_player_turn()
 
 func _enemy_ranged_attack(enemy: Node, target_idx: int, atk: Dictionary) -> void:
 	current_player_index = target_idx
@@ -763,11 +776,12 @@ func _place_bomb(target: Vector2i) -> void:
 	bomb_mode     = false
 	attack_mode   = ""
 	attack_tiles  = []
+	attack_committed_this_round = true
+	players[current_player_index].has_attacked = true
 	players[current_player_index].use_action()
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
-	_end_player_turn()
 
 func _trigger_bomb_explosion(bomb_pos: Vector2i) -> void:
 	var offset   = _grid_center_offset()
@@ -873,14 +887,14 @@ func _execute_grapple(target_hex: Vector2i) -> void:
 	mike_grappling = false
 	attack_mode    = ""
 	attack_tiles   = []
+	attack_committed_this_round = true
+	players[current_player_index].has_attacked = true
 	players[current_player_index].use_action()
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
 	if enemies.is_empty():
 		_on_floor_cleared()
-		return
-	_end_player_turn()
 
 func _best_adj_hex_of(center: Vector2i, mover_hex: Vector2i) -> Vector2i:
 	var occupied : Dictionary = {}
@@ -905,6 +919,11 @@ const PROJ_LAUNCH_SPEED    = 600.0   # px/s — tunes for ≈12 hex unobstructed
 const PROJ_DECAY_RATE      = 0.85   # exponential decay coefficient per second
 const PROJ_NEGATIVE_BOUNCE = 200.0  # flat px/s subtracted on surface/entity impact
 const PROJ_MIN_SPEED       = PROJ_LAUNCH_SPEED * 0.03  # 18 px/s — disappear threshold
+
+# Modifier-affected runtime copies — equal to base consts until modifiers change them
+var CURRENT_PROJ_LAUNCH_SPEED    : float = PROJ_LAUNCH_SPEED
+var CURRENT_PROJ_DECAY_RATE      : float = PROJ_DECAY_RATE
+var CURRENT_PROJ_NEGATIVE_BOUNCE : float = PROJ_NEGATIVE_BOUNCE
 const PROJ_REACT_PERFECT   = 0.20   # ±0.2 s from contact = perfect
 const PROJ_REACT_OK        = 0.40   # ±0.4 s from contact = ok / dodge
 const PROJ_HIT_RADIUS      = 0.75   # fraction of HEX_SIZE for player contact range
@@ -920,7 +939,7 @@ func _launch_projectile(source_idx: int, source_enemy: Node,
 						 redirect_count: int = 0, is_supercharged: bool = false,
 						 fixed_speed: float = 0.0) -> void:
 	var is_player_proj = source_idx >= 0
-	var init_speed     = PROJ_LAUNCH_SPEED if is_player_proj \
+	var init_speed     = CURRENT_PROJ_LAUNCH_SPEED if is_player_proj \
 						 else (fixed_speed if fixed_speed > 0.0 else PROJ_ENEMY_SPEEDS["medium"])
 
 	var proj = Node2D.new()
@@ -993,9 +1012,9 @@ func _process_live_projectiles(delta: float) -> void:
 
 		# Speed decay (player projs only; enemy projs use fixed speed)
 		if state.is_player_proj:
-			state.speed *= exp(-PROJ_DECAY_RATE * delta)
+			state.speed *= exp(-CURRENT_PROJ_DECAY_RATE * delta)
 
-		if state.speed < PROJ_MIN_SPEED:
+		if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
 			_proj_finalize(state)
 			continue
 
@@ -1014,8 +1033,8 @@ func _process_live_projectiles(delta: float) -> void:
 					_proj_transition()
 				continue
 			state.direction = state.direction.bounce(normal)
-			state.speed    -= PROJ_NEGATIVE_BOUNCE
-			if state.speed < PROJ_MIN_SPEED:
+			state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
+			if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
 				_proj_finalize(state)
 			continue
 
@@ -1034,8 +1053,8 @@ func _process_live_projectiles(delta: float) -> void:
 					_proj_transition()
 				continue
 			state.direction = state.direction.bounce(n)
-			state.speed    -= PROJ_NEGATIVE_BOUNCE
-			if state.speed < PROJ_MIN_SPEED:
+			state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
+			if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
 				_proj_finalize(state)
 			continue
 
@@ -1062,8 +1081,8 @@ func _process_live_projectiles(delta: float) -> void:
 				var en   : Vector2 = proj.position - e_px
 				en = en.normalized() if en.length_squared() > 0.01 else Vector2.UP
 				state.direction = state.direction.bounce(en)
-				state.speed    -= PROJ_NEGATIVE_BOUNCE
-				if state.speed < PROJ_MIN_SPEED:
+				state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
+				if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
 					_proj_finalize(state)
 					continue
 
@@ -1088,8 +1107,8 @@ func _process_live_projectiles(delta: float) -> void:
 					if is_instance_valid(proj):
 						var pn : Vector2 = (proj.position - players[pi].position).normalized()
 						state.direction = state.direction.bounce(pn)
-						state.speed    -= PROJ_NEGATIVE_BOUNCE
-						if state.speed < PROJ_MIN_SPEED:
+						state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
+						if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
 							_proj_finalize(state)
 							break
 
@@ -1161,8 +1180,8 @@ func _proj_sonny_redirect(state: Dictionary, char_idx: int, mouse_pos: Vector2) 
 	if is_instance_valid(state.node):
 		state.node.position = p_world
 
-	# Speed boost: add PROJ_NEGATIVE_BOUNCE * 0.5, decay restarts from new speed
-	state.speed     += PROJ_NEGATIVE_BOUNCE * 0.5
+	# Speed boost: add CURRENT_PROJ_NEGATIVE_BOUNCE * 0.5, decay restarts from new speed
+	state.speed     += CURRENT_PROJ_NEGATIVE_BOUNCE * 0.5
 	state.direction  = new_dir
 
 	state.redirect_count += 1
@@ -1419,15 +1438,15 @@ func _build_ui() -> void:
 	add_child(turn_label)
 
 	hp_label          = Label.new()
-	hp_label.position = Vector2(10, vp.y - 80)
+	hp_label.position = Vector2(10, vp.y - 104)
 	add_child(hp_label)
 
 	actions_label          = Label.new()
-	actions_label.position = Vector2(10, vp.y - 56)
+	actions_label.position = Vector2(10, vp.y - 80)
 	add_child(actions_label)
 
 	q_box_label          = Label.new()
-	q_box_label.position = Vector2(10, vp.y - 32)
+	q_box_label.position = Vector2(10, vp.y - 56)
 	q_box_label.modulate = Color(0.7, 0.9, 1.0)
 	add_child(q_box_label)
 
@@ -1436,6 +1455,16 @@ func _build_ui() -> void:
 	dead_label.visible  = false
 	dead_label.modulate = Color(1.0, 0.2, 0.2)
 	add_child(dead_label)
+
+	undo_label          = Label.new()
+	undo_label.position = Vector2(10, vp.y - 32)
+	undo_label.text     = "[U] Undo move"
+	add_child(undo_label)
+
+	reset_label          = Label.new()
+	reset_label.position = Vector2(180, vp.y - 32)
+	reset_label.text     = "[K] Reset turn (1 use)"
+	add_child(reset_label)
 
 func _refresh_ui() -> void:
 	if not hp_label: return
@@ -1494,6 +1523,16 @@ func _refresh_ui() -> void:
 		Phase.DEAD:
 			turn_label.text = ""
 
+	var is_player_phase = (phase == Phase.PLAYER_TURN and enemy_turn_transition_timer < 0.0)
+	if undo_label:
+		undo_label.visible  = is_player_phase
+		undo_label.modulate = Color(0.7, 0.9, 1.0) if not attack_committed_this_round \
+							  else Color(0.35, 0.35, 0.35)
+	if reset_label:
+		reset_label.visible  = is_player_phase
+		reset_label.modulate = Color(1.0, 0.8, 0.4) if not reset_turn_used \
+							   else Color(0.35, 0.35, 0.35)
+
 func _show_death_screen() -> void:
 	if dead_label:
 		dead_label.text    = "YOU DIED\nPress ENTER to restart"
@@ -1504,6 +1543,7 @@ func _show_death_screen() -> void:
 # ═══════════════════════════════════════════════════════════
 
 func _input(event: InputEvent) -> void:
+	if enemy_turn_transition_timer > 0.0: return
 	if phase == Phase.DEAD:
 		if event is InputEventKey and event.keycode == KEY_ENTER and event.pressed:
 			_restart()
@@ -1565,6 +1605,8 @@ func _handle_player_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
 			KEY_Q:
+				if not current_player.can_act(): return
+				if current_player.has_attacked: return
 				if current_player.disarmed: return
 				if players[current_player_index].uses_draw_shot:
 					# Toggle Draw Shot aim mode
@@ -1581,9 +1623,15 @@ func _handle_player_input(event: InputEvent) -> void:
 					_refresh_tile_colors()
 			KEY_D:
 				_end_player_turn()
+			KEY_U:
+				_undo_move()
+			KEY_K:
+				_reset_turn()
 			KEY_TAB:
 				_switch_player_to_other()
 			KEY_W:
+				if not current_player.can_act(): return
+				if current_player.has_attacked: return
 				if not current_player.disarmed:
 					_handle_w_key(current_player)
 
@@ -1644,6 +1692,7 @@ func _handle_left_click(click_pos: Vector2) -> void:
 			_move_player(clicked)
 
 func _move_player(dest: Vector2i) -> void:
+	if not players[current_player_index].can_act(): return
 	player_positions[current_player_index] = dest
 	var current_player = players[current_player_index]
 	current_player.grid_col = dest.x
@@ -1655,9 +1704,6 @@ func _move_player(dest: Vector2i) -> void:
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
-
-	if not current_player.can_act():
-		_end_player_turn()
 
 # ═══════════════════════════════════════════════════════════
 #  ATTACK BAR (player attacking)
@@ -1738,18 +1784,106 @@ func _on_dodge_resolved(result: String) -> void:
 func _end_player_turn() -> void:
 	attack_mode  = ""
 	attack_tiles = []
-	current_player_index += 1
-	if current_player_index >= players.size():
+	if current_player_index not in players_turned_this_round:
+		players_turned_this_round.append(current_player_index)
+	# Find the next player who hasn't had their turn this round
+	var next_idx : int = -1
+	for i in range(1, players.size() + 1):
+		var idx = (current_player_index + i) % players.size()
+		if idx not in players_turned_this_round:
+			next_idx = idx
+			break
+	if next_idx == -1:
+		# All players have acted → enemy phase after brief delay
 		current_player_index = 0
-		_start_enemy_turn()
+		_begin_enemy_turn()
 	else:
+		current_player_index = next_idx
 		_start_player_turn()
+
+func _begin_enemy_turn() -> void:
+	enemy_turn_transition_timer = ACTION_DELAY
+
+# ─── Undo / Reset ────────────────────────────────────────────────────────────
+
+func _save_turn_snapshot() -> void:
+	var pos_copy  : Array = []
+	var grid_copy : Array = []
+	var perf_copy : Array = []
+	for i in range(players.size()):
+		pos_copy.append(player_positions[i])
+		grid_copy.append({"col": players[i].grid_col, "row": players[i].grid_row})
+		perf_copy.append(players[i].perfection)
+	var enemy_copy : Array = []
+	for e in enemies:
+		enemy_copy.append({
+			"type":         e.enemy_type,
+			"col":          e.grid_col,
+			"row":          e.grid_row,
+			"hp":           e.hp,
+			"bleed_stacks": e.bleed_stacks,
+		})
+	turn_snapshot = {
+		"player_positions": pos_copy,
+		"player_grids":     grid_copy,
+		"player_perfection": perf_copy,
+		"enemies":          enemy_copy,
+		"mike_w_uses":      mike_w_uses,
+		"sonny_w_used":     sonny_w_used,
+	}
+	attack_committed_this_round = false
+
+func _undo_move() -> void:
+	if attack_committed_this_round: return
+	if turn_snapshot.is_empty(): return
+	var offset = _grid_center_offset()
+	for i in range(players.size()):
+		var g = turn_snapshot["player_grids"][i]
+		players[i].grid_col = g["col"]
+		players[i].grid_row = g["row"]
+		player_positions[i] = turn_snapshot["player_positions"][i]
+		players[i].position = _hex_to_pixel(g["col"], g["row"]) + offset
+		players[i].actions_left = players[i].actions_per_turn
+		players[i].has_attacked = false
+	players_turned_this_round = []
+	current_player_index = 0
+	_start_player_turn()
+
+func _reset_turn() -> void:
+	if reset_turn_used: return
+	if turn_snapshot.is_empty(): return
+	reset_turn_used = true
+	var offset = _grid_center_offset()
+	# Restore player positions and stats
+	for i in range(players.size()):
+		var g = turn_snapshot["player_grids"][i]
+		players[i].grid_col = g["col"]
+		players[i].grid_row = g["row"]
+		player_positions[i] = turn_snapshot["player_positions"][i]
+		players[i].position = _hex_to_pixel(g["col"], g["row"]) + offset
+		players[i].actions_left = players[i].actions_per_turn
+		players[i].perfection = turn_snapshot["player_perfection"][i]
+	mike_w_uses = turn_snapshot["mike_w_uses"]
+	sonny_w_used = turn_snapshot["sonny_w_used"]
+	# Destroy all current enemies and respawn from snapshot
+	for e in enemies.duplicate():
+		e.queue_free()
+	enemies.clear()
+	sonny_bomb_enemy = null
+	for snap in turn_snapshot["enemies"]:
+		var e = _spawn_enemy(snap["type"], snap["col"], snap["row"])
+		e.hp = snap["hp"]
+		e.bleed_stacks = snap["bleed_stacks"]
+		e.refresh_hp_bar()
+		if snap["type"] == "bomb":
+			sonny_bomb_enemy = e
+	attack_committed_this_round = false
+	players_turned_this_round = []
+	current_player_index = 0
+	_start_player_turn()
 
 func _start_player_turn() -> void:
 	phase = Phase.PLAYER_TURN
-	# Decrement timer once per round (when Sonny's turn starts after the enemy turn)
-	if current_player_index == 0 and not players[0].floor_cleared:
-		_decrement_timer()
 	players[current_player_index].reset_turn()
 	_update_valid_moves()
 	_refresh_tile_colors()
@@ -1779,6 +1913,7 @@ func _start_enemy_turn() -> void:
 
 	action_queue = []
 	for e in enemies:
+		e.has_attacked_this_turn = false
 		if e.actions_per_turn > 0:
 			action_queue.append([e, e.actions_per_turn])
 	action_timer = ACTION_DELAY
@@ -1809,13 +1944,22 @@ func _tick_bleed() -> void:
 				_on_enemy_killed(e)
 
 func _process(delta: float) -> void:
-	if phase == Phase.ENEMY_TURN:
+	if enemy_turn_transition_timer > 0.0:
+		enemy_turn_transition_timer -= delta
+		if enemy_turn_transition_timer <= 0.0:
+			enemy_turn_transition_timer = -1.0
+			_start_enemy_turn()
+	elif phase == Phase.ENEMY_TURN:
 		_process_enemy_turn(delta)
 	if not live_proj_states.is_empty():
 		_process_live_projectiles(delta)
 
 func _process_enemy_turn(delta: float) -> void:
 	if action_queue.is_empty():
+		players_turned_this_round = []
+		if not players[0].floor_cleared:
+			_decrement_timer()
+		_save_turn_snapshot()
 		_start_player_turn()
 		return
 
@@ -1867,16 +2011,23 @@ func _process_enemy_turn(delta: float) -> void:
 				action_queue.pop_front()
 
 		"attack":
-			var atk = enemy.get_current_attack()
-			if atk.get("range", 1) > 1:
-				_enemy_ranged_attack(enemy, nearest_idx, atk)
+			if not enemy.has_attacked_this_turn:
+				var atk = enemy.get_current_attack()
+				if atk.get("range", 1) > 1:
+					_enemy_ranged_attack(enemy, nearest_idx, atk)
+				else:
+					_spawn_dodge_bar(enemy, nearest_idx)
+				enemy.advance_attack()
+				enemy.has_attacked_this_turn = true
+				entry[1] -= 1
+				if entry[1] <= 0:
+					action_queue.pop_front()
+				return
 			else:
-				_spawn_dodge_bar(enemy, nearest_idx)
-			enemy.advance_attack()
-			entry[1] -= 1
-			if entry[1] <= 0:
-				action_queue.pop_front()
-			return
+				# Already attacked — consume remaining action as idle
+				entry[1] -= 1
+				if entry[1] <= 0:
+					action_queue.pop_front()
 
 		"idle":
 			action_queue.pop_front()

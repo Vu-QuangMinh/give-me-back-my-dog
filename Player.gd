@@ -105,6 +105,7 @@ var perfection     : int = 0
 var perfection_cap : int = 10   # doubled by Too Easy passive
 
 var actions_left  : int  = 2
+var has_attacked  : bool = false
 var disarmed      : bool = false
 var floor_cleared : bool = false
 
@@ -174,6 +175,7 @@ func setup_from_preset(preset_name: String) -> void:
 
 func reset_turn() -> void:
 	actions_left             = actions_per_turn   # ← uses per-character value
+	has_attacked             = false
 	armor                    = 0
 	disarmed                 = false
 	tiles_traveled_this_turn = 0

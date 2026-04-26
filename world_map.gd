@@ -143,6 +143,7 @@ func _sample_pos(from_pos: Vector2, dist_to_end: float) -> Vector2:
 		var cand  = from_pos + Vector2(cos(angle), sin(angle)) * dist
 
 		if cand.x <= 0.0 or cand.x >= KM_TOTAL: continue
+		if absf(cand.y) >= Y_KM_RANGE - 2.0: continue
 
 		var ok = true
 		for n in nodes:
