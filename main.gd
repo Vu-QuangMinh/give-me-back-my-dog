@@ -57,6 +57,71 @@ const SONNY_BOMBS_PER_FLOOR : int = 1
 # Mốc 8.3.4: Grapple gun (Mike W)
 const MIKE_GRAPPLES_PER_FLOOR : int = 2
 
+# Mốc 9.1: Floor scenarios — composition mỗi floor (column layout + enemies).
+# `current_floor` index vào array; floor cuối là boss.
+const FLOOR_SCENARIOS : Array = [
+	# Floor 0 — intro: 2 grunts, no columns
+	{
+		"name":    "Floor 1",
+		"is_boss": false,
+		"columns": [],
+		"enemies": [
+			{ "type": "grunt", "col": 7, "row": 2 },
+			{ "type": "grunt", "col": 8, "row": 5 },
+		],
+	},
+	# Floor 1 — basic: + 1 archer + 1 column
+	{
+		"name":    "Floor 2",
+		"is_boss": false,
+		"columns": [Vector2i(5, 4)],
+		"enemies": [
+			{ "type": "grunt",  "col": 7, "row": 2 },
+			{ "type": "grunt",  "col": 8, "row": 5 },
+			{ "type": "archer", "col": 10, "row": 3 },
+		],
+	},
+	# Floor 2 — ranged-heavy: 2 archers + 2 columns
+	{
+		"name":    "Floor 3",
+		"is_boss": false,
+		"columns": [Vector2i(4, 3), Vector2i(7, 4)],
+		"enemies": [
+			{ "type": "grunt",  "col": 6, "row": 1 },
+			{ "type": "archer", "col": 9, "row": 2 },
+			{ "type": "archer", "col": 10, "row": 5 },
+		],
+	},
+	# Floor 3 — assassin: 1 assassin + 1 archer + 3 columns
+	{
+		"name":    "Floor 4",
+		"is_boss": false,
+		"columns": [Vector2i(4, 3), Vector2i(7, 4), Vector2i(5, 6)],
+		"enemies": [
+			{ "type": "archer",   "col": 8,  "row": 2 },
+			{ "type": "assassin", "col": 9,  "row": 4 },
+			{ "type": "grunt",    "col": 10, "row": 6 },
+		],
+	},
+	# Floor 4 (BOSS) — mini-boss: 2 grunts + 1 archer + 2 assassins
+	{
+		"name":    "BOSS",
+		"is_boss": true,
+		"columns": [Vector2i(5, 3), Vector2i(8, 4)],
+		"enemies": [
+			{ "type": "grunt",    "col": 6,  "row": 1 },
+			{ "type": "grunt",    "col": 6,  "row": 6 },
+			{ "type": "archer",   "col": 10, "row": 3 },
+			{ "type": "assassin", "col": 9,  "row": 5 },
+			{ "type": "assassin", "col": 8,  "row": 2 },
+		],
+	},
+]
+
+# Floor hiện tại — đọc từ Engine.meta nếu có (sang scene thì giữ tiến độ),
+# else 0 (floor đầu).
+var current_floor : int = 0
+
 # ─── Camera rig ──────────────────────────────────────────────
 const CAM_PITCH_MIN     : float = 30.0
 const CAM_PITCH_MAX     : float = 60.0
@@ -128,7 +193,7 @@ var grappling            : bool = false
 var mike_grapples_left   : int  = MIKE_GRAPPLES_PER_FLOOR
 
 # ─── Turn state ──────────────────────────────────────────────
-enum Phase { PLAYER_TURN, ENEMY_TURN, DODGE_PHASE, DEAD }
+enum Phase { PLAYER_TURN, ENEMY_TURN, DODGE_PHASE, DEAD, FLOOR_CLEAR, VICTORY }
 var phase                       : Phase      = Phase.PLAYER_TURN
 var valid_moves                 : Array      = []     # Array of Vector2i — BFS reachable từ current player
 var players_turned_this_round   : Array      = []     # idx đã end turn trong round hiện tại
@@ -274,10 +339,13 @@ func is_valid_and_passable(col: int, row: int) -> bool:
 # ═══════════════════════════════════════════════════════════
 
 func _ready() -> void:
+	# Mốc 9: đọc current_floor từ Engine.meta (giữ tiến độ qua scene change).
+	if Engine.has_meta("current_floor"):
+		current_floor = int(Engine.get_meta("current_floor"))
 	grid_origin   = _grid_center_offset()
 	camera_anchor = Vector3.ZERO
 	_build_grid()
-	_setup_demo_columns()   # TODO Mốc 9: xoá khi main_test có scenarios riêng
+	_setup_demo_columns()   # Mốc 9.1: load từ FLOOR_SCENARIOS[current_floor]
 	_spawn_players()
 	_spawn_enemies()
 	_face_all_players_to_enemies()
@@ -400,11 +468,17 @@ func _build_grid() -> void:
 			tiles[key] = tile
 
 func _setup_demo_columns() -> void:
-	# DEMO: vài column để verify rendering — sẽ thay bằng scenario data ở Mốc 9
-	for cr in [Vector2i(4, 3), Vector2i(7, 4), Vector2i(5, 6)]:
+	# Mốc 9.1: load columns từ FLOOR_SCENARIOS theo current_floor.
+	var scenario : Dictionary = _current_scenario()
+	var cols : Array = scenario.get("columns", [])
+	for cr in cols:
 		if tiles.has(cr):
 			tiles[cr].setup(cr.x, cr.y, HexTileScript.Type.COLUMN)
 			column_tiles[cr] = true
+
+func _current_scenario() -> Dictionary:
+	var idx : int = clampi(current_floor, 0, FLOOR_SCENARIOS.size() - 1)
+	return FLOOR_SCENARIOS[idx]
 
 func _refresh_tile_colors() -> void:
 	var enemy_pos : Dictionary = {}
@@ -547,13 +621,10 @@ func _spawn_players() -> void:
 		players.append(p)
 
 func _spawn_enemies() -> void:
-	# Demo Mốc 3: vài enemy để xem entity 3D — sẽ thay bằng scenario data ở Mốc 9
-	var demo : Array = [
-		{"type": "grunt",  "col":  8, "row": 2},
-		{"type": "grunt",  "col":  9, "row": 5},
-		{"type": "archer", "col": 10, "row": 3},
-	]
-	for entry in demo:
+	# Mốc 9.1: load enemies từ FLOOR_SCENARIOS theo current_floor.
+	var scenario : Dictionary = _current_scenario()
+	var spawn_list : Array = scenario.get("enemies", [])
+	for entry in spawn_list:
 		var key := Vector2i(entry["col"], entry["row"])
 		if key in column_tiles: continue
 		_spawn_enemy(entry["type"], entry["col"], entry["row"])
@@ -1246,10 +1317,99 @@ func _kill_enemy(enemy: Node) -> void:
 
 # Khi hết enemies → floor clear. Mốc 9 sẽ wire vào world_map transition.
 func _check_floor_clear() -> void:
-	if enemies.is_empty():
-		sonny_bombs_left   = SONNY_BOMBS_PER_FLOOR   # reset cho floor mới
-		mike_grapples_left = MIKE_GRAPPLES_PER_FLOOR
-		print("[FLOOR CLEAR] All enemies defeated. (TODO Mốc 9: world map transition)")
+	if not enemies.is_empty(): return
+	if phase == Phase.FLOOR_CLEAR or phase == Phase.VICTORY: return
+	sonny_bombs_left   = SONNY_BOMBS_PER_FLOOR
+	mike_grapples_left = MIKE_GRAPPLES_PER_FLOOR
+	var scenario : Dictionary = _current_scenario()
+	var is_boss : bool = scenario.get("is_boss", false)
+	if is_boss:
+		phase = Phase.VICTORY
+		await get_tree().create_timer(0.6).timeout   # đợi enemy fade animation
+		_show_modal("VICTORY!", "Boss defeated. Click to play again",
+			Color(0.31, 1.00, 0.51), _restart_from_floor_zero)
+	else:
+		phase = Phase.FLOOR_CLEAR
+		await get_tree().create_timer(0.6).timeout
+		var floor_name : String = scenario.get("name", "Floor")
+		_show_modal("%s CLEARED" % floor_name, "Click to continue",
+			Color(0.31, 1.00, 0.51), _next_floor)
+	_refresh_debug()
+
+func _next_floor() -> void:
+	current_floor = mini(current_floor + 1, FLOOR_SCENARIOS.size() - 1)
+	Engine.set_meta("current_floor", current_floor)
+	get_tree().reload_current_scene()
+
+func _restart_from_floor_zero() -> void:
+	current_floor = 0
+	Engine.set_meta("current_floor", 0)
+	get_tree().reload_current_scene()
+
+# Spawn modal CanvasLayer overlay với title + hint label, dim background.
+# Click bất kỳ → gọi callback. ENTER cũng trigger thông qua _input handler.
+var _modal_callback : Callable = Callable()
+var _modal_layer    : CanvasLayer = null
+
+func _show_modal(title: String, hint: String, title_color: Color,
+		on_click: Callable) -> void:
+	if _modal_layer != null and is_instance_valid(_modal_layer):
+		_modal_layer.queue_free()
+	_modal_callback = on_click
+	_modal_layer = CanvasLayer.new()
+	_modal_layer.layer = 20   # trên HUD (5) và CombatLayer (10)
+	add_child(_modal_layer)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.65)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP
+	bg.gui_input.connect(_on_modal_clicked)
+	_modal_layer.add_child(bg)
+
+	var title_lbl := Label.new()
+	title_lbl.text = title
+	title_lbl.add_theme_font_size_override("font_size", 96)
+	title_lbl.add_theme_color_override("font_color", title_color)
+	title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	title_lbl.add_theme_constant_override("outline_size", 12)
+	title_lbl.set_anchors_preset(Control.PRESET_CENTER)
+	title_lbl.offset_left   = -500.0
+	title_lbl.offset_top    = -120.0
+	title_lbl.offset_right  =  500.0
+	title_lbl.offset_bottom =  -20.0
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title_lbl.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+	bg.add_child(title_lbl)
+
+	var hint_lbl := Label.new()
+	hint_lbl.text = hint
+	hint_lbl.add_theme_font_size_override("font_size", 36)
+	hint_lbl.add_theme_color_override("font_color", Color(1, 0.95, 0.7))
+	hint_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	hint_lbl.add_theme_constant_override("outline_size", 6)
+	hint_lbl.set_anchors_preset(Control.PRESET_CENTER)
+	hint_lbl.offset_left   = -500.0
+	hint_lbl.offset_top    =   30.0
+	hint_lbl.offset_right  =  500.0
+	hint_lbl.offset_bottom =  100.0
+	hint_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint_lbl.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+	bg.add_child(hint_lbl)
+
+func _on_modal_clicked(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT \
+			and event.pressed:
+		_trigger_modal_callback()
+
+func _trigger_modal_callback() -> void:
+	if _modal_callback.is_null(): return
+	var cb : Callable = _modal_callback
+	_modal_callback = Callable()
+	if _modal_layer != null and is_instance_valid(_modal_layer):
+		_modal_layer.queue_free()
+		_modal_layer = null
+	cb.call()
 
 # ─── Polish helpers (Mốc 6.5) ───────────────────────────────
 
@@ -1331,6 +1491,9 @@ func _run_enemy_turn() -> void:
 	if _all_players_dead():
 		phase = Phase.DEAD
 		_refresh_debug()
+		await get_tree().create_timer(0.6).timeout
+		_show_modal("GAME OVER", "All heroes fallen. Click to restart",
+			Color(1.0, 0.30, 0.30), _restart_from_floor_zero)
 		return
 
 	# Reset cho round player mới
@@ -1768,8 +1931,12 @@ func _input(event: InputEvent) -> void:
 					else:
 						_toggle_bomb_placement()
 			KEY_ENTER, KEY_KP_ENTER:
-				if phase == Phase.DEAD:
-					_restart_game()
+				# Mốc 9.4: ENTER cũng trigger modal callback (floor clear /
+				# victory / game over) bên cạnh click chuột.
+				if _modal_layer != null and is_instance_valid(_modal_layer):
+					_trigger_modal_callback()
+				elif phase == Phase.DEAD:
+					_restart_from_floor_zero()
 
 	# ── Cuộn chuột → zoom (lên = zoom in, xuống = zoom out) ──
 	if event is InputEventMouseButton and event.pressed:
@@ -1819,7 +1986,13 @@ func _input(event: InputEvent) -> void:
 func _refresh_debug() -> void:
 	if not debug_label: return
 	if phase == Phase.DEAD:
-		debug_label.text = "[DEAD] All heroes fallen. Press ENTER to restart."
+		debug_label.text = "[DEAD] All heroes fallen. ENTER/click to restart."
+		return
+	if phase == Phase.FLOOR_CLEAR:
+		debug_label.text = "[FLOOR CLEAR] ENTER/click to continue."
+		return
+	if phase == Phase.VICTORY:
+		debug_label.text = "[VICTORY] ENTER/click to play again."
 		return
 	if players.is_empty():
 		debug_label.text = "pitch %.0f° yaw %.0f° dist %.0f  hover=%s" \
@@ -1838,6 +2011,7 @@ func _refresh_debug() -> void:
 		Phase.ENEMY_TURN:  phase_str = "ENEMY"
 		Phase.DODGE_PHASE: phase_str = "DODGE!"
 		_:                 phase_str = "?"
+	var floor_name : String = _current_scenario().get("name", "Floor")
 	# Hints khác nhau cho Sonny (Boong + bomb) vs Mike (ranged)
 	var hints : String
 	if cur.uses_draw_shot:
@@ -1847,8 +2021,9 @@ func _refresh_debug() -> void:
 	else:
 		hints = "LMB=move/Boong(hold)  W=Bomb(%d)  Tab=swap  D=end  SPACE=dodge" \
 			% sonny_bombs_left
-	debug_label.text = "[%s] %s HP %d/%d  Act %d/%d   |   %s   |   pitch %.0f° dist %.0f" \
+	debug_label.text = "[%s] %s | %s HP %d/%d  Act %d/%d   |   %s   |   pitch %.0f° dist %.0f" \
 		% [
+			floor_name,
 			phase_str,
 			player_names[current_player_index],
 			cur.hp, cur.max_hp,
