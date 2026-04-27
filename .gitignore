@@ -4,3 +4,9 @@
 
 # Claude Code session artifacts
 .claude/
+
+# Exported game binaries (not source — too big for git)
+*.exe
+*.pck
+*.dll
+dist/
