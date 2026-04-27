@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cs3ldetounx1s"]
+
+[ext_resource type="Script" path="res://projectile.gd" id="1_proj"]
+
+[node name="Projectile" type="Node3D"]
+script = ExtResource("1_proj")

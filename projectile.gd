@@ -1,52 +1,116 @@
-extends Node2D
+extends Node3D
+class_name Projectile3D
 
 # ═══════════════════════════════════════════════════════════
-#  Projectile visual node
+#  Projectile3D — Mốc 8.3.2
 #
-#  Main.gd handles all trajectory / collision logic.
-#  This script only drives how the ball looks.
+#  Bay theo path_segs đã pre-compute bởi BounceTracer3D, mỗi seg là
+#  [start, end] Vector3 trên XZ plane. Speed = m/s tiêu thụ chiều dài
+#  từng seg, sang seg tiếp theo. Hit hexes đã biết từ trace, emit
+#  signal khi hit từng hex để main.gd apply damage.
 #
-#  Properties set by main.gd BEFORE add_child():
-#    redirect_count  — how many times Sonny perfectly redirected this ball
-#                      Each redirect: ball grows 10%, tints more red.
-#    is_supercharged — true once redirect_count == 3.
-#                      Ball blinks bright red; next hit = AoE explosion.
+#  Setup từ main.gd:
+#    var p = ProjectileScene.instantiate()
+#    p.segs       = trace_result["segs"]
+#    p.hit_hexes  = trace_result["hit_hexes"]
+#    p.speed      = 18.0
+#    add_child(p)
+#    p.position = segs[0][0]   # start
+#    var hex = await p.projectile_finished
 # ═══════════════════════════════════════════════════════════
 
-var damage          : float = 1.0
-var owner_char      : Node  = null
-var redirect_count  : int   = 0
-var is_supercharged : bool  = false
+signal projectile_finished(hit_hexes: Array)
 
-var _blink_timer : float = 0.0
+const DEFAULT_SPEED : float = 18.0
+const RADIUS        : float = 0.16
+
+var segs        : Array = []
+var hit_hexes   : Array = []
+var speed       : float = DEFAULT_SPEED
+
+var _seg_idx       : int   = 0
+var _seg_progress  : float = 0.0
+var _ball_mesh     : MeshInstance3D = null
+var _ready_called  : bool  = false
 
 func _ready() -> void:
-	queue_redraw()
+	_ball_mesh = MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius          = RADIUS
+	sphere.height          = RADIUS * 2.0
+	sphere.radial_segments = 18
+	sphere.rings           = 9
+	_ball_mesh.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color           = Color(1.00, 0.95, 0.55)
+	mat.emission_enabled       = true
+	mat.emission               = Color(1.00, 0.55, 0.10)
+	mat.emission_energy_multiplier = 0.6
+	_ball_mesh.material_override = mat
+	add_child(_ball_mesh)
+
+	# Trail particles: emit liên tục tại vị trí projectile, local_coords=false
+	# nên particles stay world-space khi projectile bay → tạo trail behind ball.
+	var particles := CPUParticles3D.new()
+	particles.amount                = 24
+	particles.lifetime              = 0.40
+	particles.local_coords          = false
+	particles.emitting              = true
+	particles.one_shot              = false
+	particles.gravity               = Vector3.ZERO
+	particles.initial_velocity_min  = 0.0
+	particles.initial_velocity_max  = 0.0
+	particles.scale_amount_min      = 0.6
+	particles.scale_amount_max      = 1.0
+	# Curve scale từ 1 → 0 để particle co lại dần (fake fade)
+	var scale_curve := Curve.new()
+	scale_curve.add_point(Vector2(0.0, 1.0))
+	scale_curve.add_point(Vector2(1.0, 0.0))
+	particles.scale_amount_curve = scale_curve
+	var trail_sphere := SphereMesh.new()
+	trail_sphere.radius          = 0.06
+	trail_sphere.height          = 0.12
+	trail_sphere.radial_segments = 8
+	trail_sphere.rings           = 4
+	var trail_mat := StandardMaterial3D.new()
+	trail_mat.shading_mode               = BaseMaterial3D.SHADING_MODE_UNSHADED
+	trail_mat.albedo_color               = Color(1.00, 0.70, 0.20, 0.85)
+	trail_mat.transparency               = BaseMaterial3D.TRANSPARENCY_ALPHA
+	trail_mat.emission_enabled           = true
+	trail_mat.emission                   = Color(1.00, 0.50, 0.10)
+	trail_mat.emission_energy_multiplier = 0.5
+	trail_sphere.material  = trail_mat
+	particles.mesh         = trail_sphere
+	add_child(particles)
+
+	# Đặt position khởi đầu = đầu seg đầu tiên
+	if segs.size() > 0:
+		var s : Array = segs[0]
+		position = s[0]
+	_ready_called = true
 
 func _process(delta: float) -> void:
-	if is_supercharged:
-		_blink_timer += delta
-		if _blink_timer >= 0.18:
-			_blink_timer = 0.0
-		queue_redraw()
+	if not _ready_called: return
+	if segs.is_empty():
+		emit_signal("projectile_finished", hit_hexes)
+		queue_free()
+		return
+	if _seg_idx >= segs.size():
+		emit_signal("projectile_finished", hit_hexes)
+		queue_free()
+		return
 
-func _draw() -> void:
-	var radius := 5.0 * (1.0 + redirect_count * 0.10)
-	var color  : Color
-
-	if is_supercharged:
-		# Blink between bright red and pale orange
-		var blink_on = _blink_timer < 0.09
-		color = Color(1.0, 0.08, 0.08, 0.97) if blink_on \
-			  else Color(1.0, 0.55, 0.20, 0.97)
-	elif redirect_count > 0:
-		# Gradually shift from white toward red with each redirect
-		var red_t  = minf(1.0, redirect_count * 0.34)
-		color = Color(1.0,
-					  1.0 - red_t * 0.82,
-					  1.0 - red_t * 0.90,
-					  0.96)
-	else:
-		color = Color(1.0, 1.0, 1.0, 0.96)
-
-	draw_circle(Vector2.ZERO, radius, color)
+	var seg : Array  = segs[_seg_idx]
+	var seg_start : Vector3 = seg[0]
+	var seg_end   : Vector3 = seg[1]
+	var seg_len   : float   = seg_start.distance_to(seg_end)
+	if seg_len < 0.001:
+		_seg_idx     += 1
+		_seg_progress = 0.0
+		return
+	_seg_progress += speed * delta
+	var t : float = clampf(_seg_progress / seg_len, 0.0, 1.0)
+	position = seg_start.lerp(seg_end, t)
+	if _seg_progress >= seg_len:
+		_seg_idx     += 1
+		_seg_progress = 0.0

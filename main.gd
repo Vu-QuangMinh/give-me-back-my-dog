@@ -43,10 +43,19 @@ const DodgeBarScene  = preload("res://dodge_bar.tscn")
 const ChargeBarScene = preload("res://sonny_charge_bar.tscn")
 # Mốc 8.1: Mike timing bar (Draw Shot)
 const TimingBarScene = preload("res://mike_timing_bar.tscn")
+# Mốc 8.3: Bouncing projectile cho Mike's Draw Shot
+const ProjectileScene = preload("res://projectile.tscn")
+const PROJECTILE_LAUNCH_SPEED : float = 18.0
+const PROJECTILE_DECAY_RATE   : float = 0.85
+const PROJECTILE_MIN_SPEED    : float = 1.0
+const PROJECTILE_NEG_BOUNCE   : float = 5.0
+const PROJECTILE_Y            : float = 1.10   # độ cao bay (giữa thân character)
 # Mốc 7.3: Bomb fuse
 const BOMB_FUSE_TURNS    : int = 2
 const BOMB_AOE_DAMAGE    : int = 2
 const SONNY_BOMBS_PER_FLOOR : int = 1
+# Mốc 8.3.4: Grapple gun (Mike W)
+const MIKE_GRAPPLES_PER_FLOOR : int = 2
 
 # ─── Camera rig ──────────────────────────────────────────────
 const CAM_PITCH_MIN     : float = 30.0
@@ -110,8 +119,13 @@ var placing_bomb         : bool = false        # true khi Sonny đang chọn ô 
 var sonny_bombs_left     : int  = SONNY_BOMBS_PER_FLOOR
 
 # Mốc 8 — Mike timing bar state
-var mike_timing_bar      : Node = null
-var mike_timing_target   : Node = null
+var mike_timing_bar        : Node    = null
+var mike_timing_target_pos : Vector3 = Vector3.ZERO  # free direction Vector3
+var mike_aim_overlay       : Node    = null   # AimOverlay3D — preview projectile path
+var mike_aiming            : bool    = false  # Q toggle — chỉ fire/preview khi true
+# Mốc 8.3.4 — grapple gun state
+var grappling            : bool = false
+var mike_grapples_left   : int  = MIKE_GRAPPLES_PER_FLOOR
 
 # ─── Turn state ──────────────────────────────────────────────
 enum Phase { PLAYER_TURN, ENEMY_TURN, DODGE_PHASE, DEAD }
@@ -124,7 +138,8 @@ var reset_turn_used             : bool       = false
 var turn_snapshot               : Dictionary = {}     # state ở đầu round để undo/reset
 
 # ─── Hover ──────────────────────────────────────────────────
-var hover_hex     : Vector2i = Vector2i(-1, -1)
+var hover_hex       : Vector2i = Vector2i(-1, -1)
+var hover_world_pos : Vector3  = Vector3(NAN, NAN, NAN)   # mouse world XZ — cho Mike aim preview free direction
 
 var camera_anchor : Vector3 = Vector3.ZERO
 var grid_origin   : Vector3 = Vector3.ZERO
@@ -350,6 +365,7 @@ func _on_hud_avatar_clicked(char_name: String) -> void:
 	var idx : int = player_names.find(char_name)
 	if idx < 0 or idx == current_player_index: return
 	if players[idx].hp <= 0: return
+	_clear_action_modes()
 	current_player_index = idx
 	_update_valid_moves()
 	_refresh_tile_colors()
@@ -407,10 +423,27 @@ func _refresh_tile_colors() -> void:
 	if not players.is_empty():
 		cur_pos = player_positions[current_player_index]
 
+	# Grapple mode (Mike W): tô đỏ tất cả enemy như potential targets.
+	# Click hex nào cũng được → fire hook xuyên tường.
+	if grappling and not players.is_empty():
+		_clear_aim_preview()   # tránh aim preview xuất hiện song song với grapple
+		for key in tiles:
+			var tile = tiles[key]
+			if key in column_tiles or key in fire_pit_tiles:
+				tile.set_state("normal")
+			elif key == cur_pos:
+				tile.set_state("selected")
+			elif key in enemy_pos:
+				tile.set_state("attack")
+			else:
+				tile.set_state("normal")
+		return
+
 	# Bomb placement mode: highlight ô kề bên passable+empty (xanh "valid"),
 	# hover sẽ đỏ chói "attack" để báo "đặt ở đây?". Override hoàn toàn logic
 	# bình thường khi placing_bomb=true.
 	if placing_bomb and not players.is_empty():
+		_clear_aim_preview()
 		var cur_p = players[current_player_index]
 		for key in tiles:
 			var tile = tiles[key]
@@ -459,6 +492,9 @@ func _refresh_tile_colors() -> void:
 				tile.set_state("valid")
 		else:
 			tile.set_state("normal")
+	# Aim preview cho Mike — update khi state đổi (move/switch/hover).
+	# Tự gate trong _update_aim_preview (chỉ chạy khi Mike active + hover enemy + LOS clear).
+	_update_aim_preview()
 
 # ═══════════════════════════════════════════════════════════
 #  ENTITY SPAWNING
@@ -663,28 +699,45 @@ func _handle_lmb_press(mouse_pos: Vector2) -> void:
 	if placing_bomb:
 		_place_bomb_at(hex)
 		return
+	# Grapple mode (Mike W) — click vào hex bất kỳ → fire hook
+	if grappling:
+		_grapple_at(hex)
+		return
 	# Click vào player KHÁC (còn sống) → switch sang nhân vật đó
 	var clicked_player_idx : int = _get_player_at(hex)
 	if clicked_player_idx >= 0 and clicked_player_idx != current_player_index \
 			and players[clicked_player_idx].hp > 0:
+		_clear_action_modes()
 		current_player_index = clicked_player_idx
 		_update_valid_moves()
 		_refresh_tile_colors()
 		_refresh_debug()
 		_refresh_hud()
 		return
+	var current_player = players[current_player_index]
+	# Mike (uses_draw_shot): chỉ fire khi đang aim mode (Q toggle).
+	# Outside aim mode: chỉ click trên valid_moves để move (tránh bắn nhầm).
+	if current_player.uses_draw_shot:
+		if hex in valid_moves:
+			_move_player(hex)
+			return
+		# Click ngoài valid_moves chỉ fire khi đang aim mode
+		if mike_aiming and current_player.can_act():
+			var world_pos : Vector3 = mouse_to_ground(mouse_pos)
+			if not is_nan(world_pos.x):
+				var mike_pos : Vector3 = current_player.position
+				if absf(world_pos.x - mike_pos.x) > 0.01 \
+						or absf(world_pos.z - mike_pos.z) > 0.01:
+					mike_aiming = false   # exit aim mode khi click fire
+					_start_mike_timing(world_pos, mouse_pos)
+					return
+		return
+	# Sonny: chỉ click enemy kề bên → charge bar.
 	var target_enemy : Node = _get_enemy_at(hex)
-	var current_player          = players[current_player_index]
-	# Click enemy + còn action + đánh được:
-	#   - Sonny (uses_draw_shot=false): mở charge bar (HOLD)
-	#   - Mike  (uses_draw_shot=true) : mở timing bar (HOLD + DRAG)
 	if target_enemy != null and current_player.can_act() \
 			and _can_attack_target(current_player.grid_col,
 				current_player.grid_row, hex.x, hex.y):
-		if current_player.uses_draw_shot:
-			_start_mike_timing(target_enemy, mouse_pos)
-		else:
-			_start_sonny_charge(target_enemy)
+		_start_sonny_charge(target_enemy)
 		return
 	if hex in valid_moves:
 		_move_player(hex)
@@ -756,23 +809,96 @@ func _on_charge_resolved(result: String, target_enemy: Node) -> void:
 #  MIKE TIMING BAR — Mốc 8.1/8.2 (Draw Shot)
 # ═══════════════════════════════════════════════════════════
 
-func _start_mike_timing(target_enemy: Node, mouse_pos: Vector2) -> void:
+# Q key: toggle aim mode cho Mike. Chỉ khi aim mode = true thì preview line
+# hiện + click LMB sẽ fire. Outside aim mode, click LMB chỉ move (tránh bắn
+# nhầm khi đi).
+# Helper: clear mọi action mode khi switch player hoặc end turn.
+func _clear_action_modes() -> void:
+	placing_bomb = false
+	grappling    = false
+	mike_aiming  = false
+	_clear_aim_preview()
+
+func _toggle_mike_aim_mode() -> void:
+	if phase != Phase.PLAYER_TURN: return
+	if players.is_empty(): return
+	var current = players[current_player_index]
+	if not current.uses_draw_shot: return
+	if not current.can_act(): return
+	if mike_timing_bar != null: return    # đang fire, không toggle
+	mike_aiming = not mike_aiming
+	if not mike_aiming:
+		_clear_aim_preview()
+	_refresh_tile_colors()                # trigger _update_aim_preview ở cuối
+	_refresh_debug()
+
+func _start_mike_timing(target_pos: Vector3, mouse_pos: Vector2) -> void:
 	var current = players[current_player_index]
 	if not current.can_act(): return
 	var bar = TimingBarScene.instantiate()
-	bar.timing_resolved.connect(_on_mike_timing_resolved.bind(target_enemy))
+	bar.timing_resolved.connect(_on_mike_timing_resolved.bind(target_pos))
 	camera.add_child(bar)
 	bar.position = Vector3(0.0, -0.18, -1.2)
-	bar.setup(mouse_pos)   # drag_anchor = vị trí chuột lúc click
-	mike_timing_bar    = bar
-	mike_timing_target = target_enemy
+	bar.setup(mouse_pos)
+	mike_timing_bar        = bar
+	mike_timing_target_pos = target_pos
+	# Aim preview: trace + vẽ overlay theo direction đã lock
+	var trace_result : Dictionary = _compute_projectile_trace(current, target_pos)
+	if mike_aim_overlay == null:
+		mike_aim_overlay = AimOverlay3D.new()
+		add_child(mike_aim_overlay)
+	mike_aim_overlay.show_path(trace_result["segs"])
 
-func _on_mike_timing_resolved(result: String, target_enemy: Node) -> void:
-	mike_timing_bar    = null
-	mike_timing_target = null
-	if not is_instance_valid(target_enemy):
-		_refresh_debug()
+# Hover preview cho Mike: khi Mike active + cursor trên ground (mouse_to_ground
+# return valid Vector3), vẽ đường projectile dự kiến từ Mike đến điểm cursor.
+# Free direction — không lock vào hex center, update mỗi frame mouse motion.
+func _update_aim_preview() -> void:
+	# Không update khi timing bar đang active (path đã lock từ click)
+	if mike_timing_bar != null: return
+	if phase != Phase.PLAYER_TURN:
+		_clear_aim_preview()
 		return
+	if players.is_empty():
+		_clear_aim_preview()
+		return
+	var current = players[current_player_index]
+	if not current.uses_draw_shot:
+		_clear_aim_preview()
+		return
+	if not current.can_act():
+		_clear_aim_preview()
+		return
+	# Chỉ vẽ preview khi đang aim mode (Q đã bật)
+	if not mike_aiming:
+		_clear_aim_preview()
+		return
+	# Cursor world position phải hợp lệ (ray hit ground plane)
+	if is_nan(hover_world_pos.x):
+		_clear_aim_preview()
+		return
+	# Cursor cũng không nên ở chính ô của Mike (no self-fire)
+	var mike_pos : Vector3 = current.position
+	if absf(hover_world_pos.x - mike_pos.x) < 0.01 \
+			and absf(hover_world_pos.z - mike_pos.z) < 0.01:
+		_clear_aim_preview()
+		return
+	var trace_result : Dictionary = _compute_projectile_trace(current, hover_world_pos)
+	if mike_aim_overlay == null:
+		mike_aim_overlay = AimOverlay3D.new()
+		add_child(mike_aim_overlay)
+	mike_aim_overlay.show_path(trace_result["segs"])
+
+func _clear_aim_preview() -> void:
+	if mike_aim_overlay != null and is_instance_valid(mike_aim_overlay):
+		mike_aim_overlay.queue_free()
+		mike_aim_overlay = null
+
+func _on_mike_timing_resolved(result: String, target_pos: Vector3) -> void:
+	mike_timing_bar = null
+	# Clear aim preview overlay (cả khi miss)
+	if mike_aim_overlay != null and is_instance_valid(mike_aim_overlay):
+		mike_aim_overlay.queue_free()
+		mike_aim_overlay = null
 	var current = players[current_player_index]
 	var base_dmg : int = current.get_q_dmg()
 	var dmg      : int = 0
@@ -780,29 +906,95 @@ func _on_mike_timing_resolved(result: String, target_enemy: Node) -> void:
 		"perfect": dmg = int(round(base_dmg * 1.5 + 0.4))
 		"hit":     dmg = base_dmg
 		"miss":    dmg = 0
-	if dmg > 0:
-		if current.has_method("play_attack"):
-			current.play_attack()
-		target_enemy.take_damage(dmg)
-		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
-			"-%d" % dmg, Color(1.0, 0.55, 0.30))
-		if target_enemy.hp <= 0:
-			_kill_enemy(target_enemy)
-		else:
-			if hud != null:
-				hud.update_enemy_hp(target_enemy.get_instance_id(),
-					target_enemy.hp, target_enemy.max_hp)
-	else:
-		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
-			"MISS!", Color(0.7, 0.7, 0.7))
 	current.use_action()
 	current.has_attacked = true
 	attack_committed_this_round = true
+	if dmg > 0:
+		if current.has_method("play_attack"):
+			current.play_attack()
+		# Fire bouncing projectile theo direction đã lock (free Vector3 target).
+		await _fire_bouncing_projectile(current, target_pos, dmg)
+	else:
+		_spawn_damage_popup(current.position + Vector3(0, 1.8, 0),
+			"MISS!", Color(0.7, 0.7, 0.7))
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_debug()
 	_refresh_hud()
 	_check_floor_clear()
+
+# ═══════════════════════════════════════════════════════════
+#  PROJECTILE FIRE — Mốc 8.3.3
+# ═══════════════════════════════════════════════════════════
+
+# Build BounceTracer3D với grid bounds + columns + enemy positions, trace từ
+# shooter đến target_pos (free Vector3 trên XZ plane). Trả { segs, hit_hexes }.
+func _compute_projectile_trace(shooter, target_pos: Vector3) -> Dictionary:
+	var tracer := BounceTracer3D.new()
+	tracer.bounds_min = Vector3(
+		grid_origin.x - 0.6,
+		PROJECTILE_Y,
+		grid_origin.z - 0.6)
+	tracer.bounds_max = Vector3(
+		grid_origin.x + HEX_SIZE * 1.5 * float(GRID_COLS) + 0.6,
+		PROJECTILE_Y,
+		grid_origin.z + HEX_SIZE * sqrt(3.0) * float(GRID_ROWS) + 0.6)
+	tracer.columns = column_tiles.duplicate()
+	var enemy_dict : Dictionary = {}
+	for e in enemies:
+		if is_instance_valid(e) and e.hp > 0:
+			enemy_dict[Vector2i(e.grid_col, e.grid_row)] = true
+	tracer.entities = enemy_dict
+	tracer.hex_to_world = self.hex_to_world
+	tracer.world_to_hex = func(p: Vector3) -> Vector2i: return world_to_hex(p)
+	tracer.launch_speed    = PROJECTILE_LAUNCH_SPEED
+	tracer.decay_rate      = PROJECTILE_DECAY_RATE
+	tracer.min_speed       = PROJECTILE_MIN_SPEED
+	tracer.negative_bounce = PROJECTILE_NEG_BOUNCE
+	var shooter_pos : Vector3 = shooter.position
+	var dir : Vector3 = Vector3(target_pos.x - shooter_pos.x, 0.0,
+		target_pos.z - shooter_pos.z).normalized()
+	var start : Vector3 = Vector3(shooter_pos.x, PROJECTILE_Y, shooter_pos.z)
+	var exclude_hexes : Dictionary = {
+		Vector2i(shooter.grid_col, shooter.grid_row): true
+	}
+	# stop_on_hit = false → projectile bounce off enemy (giống wall/column);
+	# multiple enemies trên path đều ăn damage; speed decay tự dừng sau vài bounce.
+	return tracer.trace(start, dir, false, exclude_hexes)
+
+func _fire_bouncing_projectile(shooter, target_pos: Vector3, dmg: int) -> void:
+	# Compute trace (giống aim preview, nên path khớp 100% với preview line).
+	var trace_result : Dictionary = _compute_projectile_trace(shooter, target_pos)
+	var segs      : Array = trace_result["segs"]
+	var hit_hexes : Array = trace_result["hit_hexes"]
+
+	# Hide aim preview overlay khi projectile thật bay
+	if mike_aim_overlay != null and is_instance_valid(mike_aim_overlay):
+		mike_aim_overlay.queue_free()
+		mike_aim_overlay = null
+
+	# Spawn projectile node, set path data, animate dọc theo segs.
+	var proj = ProjectileScene.instantiate()
+	proj.segs      = segs
+	proj.hit_hexes = hit_hexes
+	proj.speed     = PROJECTILE_LAUNCH_SPEED
+	add_child(proj)
+	if not segs.is_empty():
+		proj.position = segs[0][0]
+
+	# Đợi projectile tới đích / hết bounce → apply damage cho enemies trên path.
+	var hits = await proj.projectile_finished
+	for hex in hits:
+		var e = _get_enemy_at(hex)
+		if e == null or not is_instance_valid(e): continue
+		e.take_damage(dmg)
+		_spawn_damage_popup(e.position + Vector3(0, 1.8, 0),
+			"-%d" % dmg, Color(1.0, 0.55, 0.30))
+		if e.hp <= 0:
+			_kill_enemy(e)
+		else:
+			if hud != null:
+				hud.update_enemy_hp(e.get_instance_id(), e.hp, e.max_hp)
 
 # ═══════════════════════════════════════════════════════════
 #  SONNY BOMB — Mốc 7.3 (W key)
@@ -857,6 +1049,123 @@ func _place_bomb_at(hex: Vector2i) -> void:
 	_refresh_tile_colors()
 	_refresh_debug()
 	_refresh_hud()
+
+# ═══════════════════════════════════════════════════════════
+#  MIKE GRAPPLE GUN — Mốc 8.3.4 (W key)
+#  ► Hook bay theo straight hex line từ Mike đến hex được click,
+#    XUYÊN qua walls/columns (không bounce). Entity đầu tiên trong line
+#    bị kéo 1 ô về phía Mike.
+#  ► 2 lần / floor, reset khi floor clear.
+# ═══════════════════════════════════════════════════════════
+
+func _toggle_grapple_mode() -> void:
+	if phase != Phase.PLAYER_TURN: return
+	if players.is_empty(): return
+	var current = players[current_player_index]
+	if not current.uses_draw_shot: return        # chỉ Mike
+	if not current.can_act(): return
+	if mike_grapples_left <= 0: return
+	if mike_timing_bar != null: return
+	grappling = not grappling
+	_refresh_tile_colors()
+	_refresh_debug()
+
+func _grapple_at(hex: Vector2i) -> void:
+	if not grappling: return
+	var current = players[current_player_index]
+	var src : Vector2i = Vector2i(current.grid_col, current.grid_row)
+	if hex == src: return
+
+	# Find first character (player hoặc enemy khác) trong straight hex line.
+	var path : Array = _hex_line(src.x, src.y, hex.x, hex.y)
+	var pull_target : Node    = null
+	var pull_idx_in_path : int = -1
+	for i in range(1, path.size()):   # skip src
+		var h : Vector2i = path[i]
+		var e : Node = _get_enemy_at(h)
+		if e != null:
+			pull_target = e
+			pull_idx_in_path = i
+			break
+		var p_idx : int = _get_player_at(h)
+		if p_idx >= 0 and p_idx != current_player_index:
+			pull_target = players[p_idx]
+			pull_idx_in_path = i
+			break
+
+	grappling = false
+	mike_grapples_left -= 1
+	current.use_action()
+	attack_committed_this_round = true
+
+	# Visual: spawn animated line từ Mike đến target hoặc clicked hex.
+	var line_start : Vector3 = Vector3(current.position.x, PROJECTILE_Y,
+		current.position.z)
+	var line_end : Vector3
+	if pull_target != null:
+		line_end = Vector3(pull_target.position.x, PROJECTILE_Y,
+			pull_target.position.z)
+	else:
+		var hex_world : Vector3 = entity_position(hex.x, hex.y)
+		line_end = Vector3(hex_world.x, PROJECTILE_Y, hex_world.z)
+	_spawn_grapple_line(line_start, line_end)
+
+	if pull_target != null and pull_idx_in_path > 1:
+		# Pull dest = ô liền trước target trên path (1 ô về phía Mike).
+		var pull_dest : Vector2i = path[pull_idx_in_path - 1]
+		# Kéo nếu pull_dest passable + empty
+		if is_valid_and_passable(pull_dest.x, pull_dest.y) \
+				and _get_enemy_at(pull_dest) == null \
+				and _get_player_at(pull_dest) < 0:
+			_apply_grapple_pull(pull_target, pull_dest)
+			_spawn_damage_popup(pull_target.position + Vector3(0, 1.8, 0),
+				"GRAPPLED!", Color(0.50, 0.95, 1.00))
+		else:
+			_spawn_damage_popup(pull_target.position + Vector3(0, 1.8, 0),
+				"BLOCKED", Color(0.7, 0.7, 0.7))
+	else:
+		# Không trúng ai
+		_spawn_damage_popup(current.position + Vector3(0, 1.8, 0),
+			"MISS GRAPPLE", Color(0.7, 0.7, 0.7))
+
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+
+# Move entity to dest hex (smooth tween) + cập nhật state.
+func _apply_grapple_pull(entity: Node, dest: Vector2i) -> void:
+	entity.grid_col = dest.x
+	entity.grid_row = dest.y
+	_move_entity_smooth(entity, dest.x, dest.y)
+	# Nếu là player, update player_positions
+	for i in range(players.size()):
+		if players[i] == entity:
+			player_positions[i] = dest
+			break
+
+# Visual: BoxMesh thin nối start↔end, hold 0.20s rồi fade alpha 0.30s.
+func _spawn_grapple_line(start: Vector3, end: Vector3) -> void:
+	var dir : Vector3 = end - start
+	var len : float   = dir.length()
+	if len < 0.01: return
+	dir = dir.normalized()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(len, 0.05, 0.05)
+	var mi := MeshInstance3D.new()
+	mi.mesh = box_mesh
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(0.55, 0.85, 1.00, 0.95)
+	mi.material_override = mat
+	mi.position = (start + end) * 0.5
+	mi.rotation = Vector3(0.0, atan2(-dir.z, dir.x), 0.0)
+	add_child(mi)
+	var tw := create_tween()
+	tw.tween_interval(0.20)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.30)
+	tw.tween_callback(mi.queue_free)
 
 # Sau mỗi enemy turn, decrement fuse + explode bomb hết hạn.
 func _tick_bombs_after_enemy_turn() -> void:
@@ -938,7 +1247,8 @@ func _kill_enemy(enemy: Node) -> void:
 # Khi hết enemies → floor clear. Mốc 9 sẽ wire vào world_map transition.
 func _check_floor_clear() -> void:
 	if enemies.is_empty():
-		sonny_bombs_left = SONNY_BOMBS_PER_FLOOR   # reset bombs cho floor mới
+		sonny_bombs_left   = SONNY_BOMBS_PER_FLOOR   # reset cho floor mới
+		mike_grapples_left = MIKE_GRAPPLES_PER_FLOOR
 		print("[FLOOR CLEAR] All enemies defeated. (TODO Mốc 9: world map transition)")
 
 # ─── Polish helpers (Mốc 6.5) ───────────────────────────────
@@ -997,6 +1307,7 @@ func _play_death_animation(entity: Node, free_after: bool) -> void:
 # ═══════════════════════════════════════════════════════════
 
 func _start_enemy_turn() -> void:
+	_clear_action_modes()
 	phase = Phase.ENEMY_TURN
 	valid_moves = []
 	valid_attack_targets = []
@@ -1197,6 +1508,7 @@ func _switch_player_to_other() -> void:
 	if players.size() < 2: return
 	var other_idx = (current_player_index + 1) % players.size()
 	if players[other_idx].hp <= 0: return
+	_clear_action_modes()
 	current_player_index = other_idx
 	_update_valid_moves()
 	_refresh_tile_colors()
@@ -1392,11 +1704,21 @@ func _pick_entity_hex(origin: Vector3, dir: Vector3) -> Vector2i:
 # ═══════════════════════════════════════════════════════════
 
 func _input(event: InputEvent) -> void:
-	# ESC = cancel bomb mode trước, sau đó mới quit game
+	# ESC = cancel bomb/grapple/aim mode trước, sau đó mới quit game
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		if placing_bomb:
 			placing_bomb = false
 			_refresh_tile_colors()
+			_refresh_debug()
+			return
+		if grappling:
+			grappling = false
+			_refresh_tile_colors()
+			_refresh_debug()
+			return
+		if mike_aiming:
+			mike_aiming = false
+			_clear_aim_preview()
 			_refresh_debug()
 			return
 		get_tree().quit()
@@ -1432,9 +1754,19 @@ func _input(event: InputEvent) -> void:
 			KEY_K:
 				if phase == Phase.PLAYER_TURN:
 					_reset_turn()
+			KEY_Q:
+				if phase == Phase.PLAYER_TURN and not players.is_empty():
+					var cur = players[current_player_index]
+					if cur.uses_draw_shot:
+						_toggle_mike_aim_mode()
+					# Sonny dùng LMB hold cho charge bar, không cần Q
 			KEY_W:
-				if phase == Phase.PLAYER_TURN:
-					_toggle_bomb_placement()
+				if phase == Phase.PLAYER_TURN and not players.is_empty():
+					var cur = players[current_player_index]
+					if cur.uses_draw_shot:
+						_toggle_grapple_mode()
+					else:
+						_toggle_bomb_placement()
 			KEY_ENTER, KEY_KP_ENTER:
 				if phase == Phase.DEAD:
 					_restart_game()
@@ -1466,11 +1798,16 @@ func _input(event: InputEvent) -> void:
 			return   # bỏ qua hover update khi đang xoay
 		# Mike đang aim → drag chuột cập nhật drag_center của timing bar.
 		_handle_mouse_motion(event.position)
+		# Track mouse world position cho aim preview free direction
+		hover_world_pos = mouse_to_ground(event.position)
 		var hex : Vector2i = mouse_to_hex(event.position)
 		if hex != hover_hex:
 			hover_hex = hex
 			_refresh_tile_colors()
 			_refresh_debug()
+		else:
+			# Hex không đổi nhưng world pos đổi → vẫn cần update aim preview
+			_update_aim_preview()
 
 	# LMB press / release — split để Sonny giữ-thả LMB cho Boong charge bar.
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
@@ -1491,6 +1828,9 @@ func _refresh_debug() -> void:
 	if placing_bomb:
 		debug_label.text = "[PLACING BOMB] click ô kề bên (passable) để đặt — ESC = cancel"
 		return
+	if grappling:
+		debug_label.text = "[GRAPPLE] click hex bất kỳ để kéo entity đầu tiên trên đường — ESC = cancel"
+		return
 	var cur = players[current_player_index]
 	var phase_str : String
 	match phase:
@@ -1501,7 +1841,9 @@ func _refresh_debug() -> void:
 	# Hints khác nhau cho Sonny (Boong + bomb) vs Mike (ranged)
 	var hints : String
 	if cur.uses_draw_shot:
-		hints = "LMB=move/shoot  Tab=swap  D=end  SPACE=dodge"
+		var aim_state : String = "[AIMING] " if mike_aiming else ""
+		hints = "%sQ=Aim  LMB=move/Shoot  W=Grapple(%d)  Tab=swap  D=end" \
+			% [aim_state, mike_grapples_left]
 	else:
 		hints = "LMB=move/Boong(hold)  W=Bomb(%d)  Tab=swap  D=end  SPACE=dodge" \
 			% sonny_bombs_left
