@@ -1,5 +1,5 @@
 # GIVE ME BACK MY DOG — Game Design Document
-> Version: 1.6
+> Version: 1.7
 > Engine: Godot 4, GDScript
 > Genre: Roguelite, Turn-based tactics, Hex grid dungeon crawler
 
@@ -13,10 +13,7 @@
 5. [Characters — Sonny & Mike](#5-characters--sonny--mike)
 5B. [Projectile System](#5b-projectile-system)
 6. [Actions & Turn System](#6-actions--turn-system)
-7. [Weapons & Abilities](#7-weapons--abilities)
-8. [Combat — Attack Bar](#8-combat--attack-bar)
 9. [Combat — Dodge Bar](#9-combat--dodge-bar)
-10. [Cockiness](#10-cockiness)
 11. [Damage Formula](#11-damage-formula)
 12. [Status Effects](#12-status-effects)
 13. [Enemies](#13-enemies)
@@ -284,26 +281,10 @@ Sonny has two reaction types, both triggered by incoming attacks.
 
 ##### Reaction B — Projectile Redirect
 
-- Trigger: **any player-fired projectile** is on a collision course with Sonny's tile.
-- Input: press **SPACE**. No separate timing bar — the reaction is tied to the real-time position and moment of collision.
+- Trigger: **any projectile** is on a collision course with Sonny's hex border.
+- Input: press **SPACE**. No separate timing bar — the reaction is tied to the real-time collision moment.
 - No visual warning is shown. The player must watch the ball and react.
-
-**Timing (measured from t = 0.0s — the moment of actual contact):**
-
-| Window | Result |
-|--------|--------|
-| SPACE pressed within ±0.2s of contact | **Perfect redirect** → projectile redirects toward mouse cursor. Speed is set to `current_speed + NEGATIVE_BOUNCE * 0.5`. Decay restarts from this new speed as if freshly fired. Green text **"REDIRECT!"** shown. |
-| SPACE pressed within ±0.2s–±0.4s of contact | **OK redirect** → projectile phases through Sonny with no damage, no speed change, no redirect. |
-| SPACE not pressed within ±0.4s | **Miss** → Sonny takes full projectile damage. |
-
-**Redirect rules:**
-- Redirected projectile travels from Sonny's position toward **mouse cursor position at moment SPACE is pressed**.
-- Projectile **does not gain damage** — deals original damage only.
-- Decay restarts from `current_speed + NEGATIVE_BOUNCE * 0.5` — it does not reset to original launch speed.
-- All other projectile properties preserved.
-- If Sonny perfectly redirects the **same projectile three times in a row** (`redirect_count == 3`), the projectile becomes **Supercharged** (see Section 5B).
-- Each redirect shifts the ball's color progressively more red (based on `redirect_count`).
-- Sonny can deliberately supercharge by choosing to redirect the same projectile a second time.
+- Full rules, timing windows, speed interaction, and ownership changes are defined in **Section 5B — Sonny: Projectile Redirect**.
 
 ---
 
@@ -359,19 +340,34 @@ Mike's Q attack uses a **3-step aim → charge → release flow**.
 
 ---
 
-#### Grapple Gun — W Attack (2 uses per map)
+#### Grapple Gun — W Attack (1 uses per map)
+Mike fires a hook (silver) attached to a rope (brown line) in any direction.
+Hook projectile behavior:
 
-Mike fires a hook (silver) attached to a rope (brown line) at any target. Infinite range.
+Infinite range.
+Phases through walls, columns, and Sonny's bomb.
+Stops at the first character it hits, regardless of friend or enemy. That character becomes the pull target.
+If no character is hit, nothing happens and the use is refunded.
 
-**On hit:**
-- Deals **1 damage** to enemies. Does **not** damage Sonny.
-- **Pull logic:**
-  - If target is **movable**: pull target to the best fitting hex adjacent to Mike.
-  - If target is **immovable** (walls, columns, and some enemies flagged as immovable): pull Mike to the best fitting hex adjacent to the target.
+On grab:
 
-**Best fitting hex** = the empty, passable hex adjacent to the destination that minimizes remaining distance.
+Sonny: 0 damage.
+Enemy: 1 damage immediately on grab.
 
-**Upgrades:** *(not yet implemented)*
+Pull logic:
+
+The target is dragged along the hook's incoming angle toward Mike.
+The target lands on the nearest empty, passable hex along that angle.
+The drag has full collision — the target interacts with walls, columns, other characters, and bombs exactly as a pushed entity would.
+If the target's path is blocked by an obstacle before reaching the destination:
+
+Target stops at the nearest available hex next to the obstacle (best fit for the incoming angle).
+Target takes 1 collision damage.
+If the obstacle is Sonny's bomb: the bomb takes 1 damage and explodes normally.
+
+
+
+Upgrades: (not yet implemented)
 
 ---
 
@@ -379,29 +375,11 @@ Mike fires a hook (silver) attached to a rope (brown line) at any target. Infini
 
 ##### Reaction A — Dodge Any Projectile
 
-- Trigger: **any projectile** is on a collision course with Mike's tile.
+- Trigger: **any projectile** is on a collision course with Mike's hex border.
 - Input: press **SPACE**. No separate timing bar — the reaction is tied to the real-time collision moment.
 - Mike **must** attempt to dodge — there is no option to ignore it.
 - No visual warning is shown.
-
-**Timing (measured from t = 0.0s):**
-
-| Window | Source: Own Projectile | Source: Other Character's Projectile |
-|--------|----------------------|--------------------------------------|
-| ±0.2s (Perfect) | Projectile removed, 0 damage | 0 damage + **instant counter-attack** (see below) |
-| ±0.2s–±0.4s (Normal) | Projectile removed, 0 damage + projectile continues past Mike on its original trajectory | 0 damage, no counter. Projectile continues past Mike on its original trajectory. |
-| Outside ±0.4s (Miss) | Take full damage | Take full damage |
-
-**On normal dodge — projectile continues:**
-- The projectile ignores collision with Mike and continues in its current direction at its current speed.
-- Speed and decay are unchanged.
-
-**Counter-attack rules (perfect dodge of non-own projectile only):**
-- Counter fires **instantly** toward the attacker — no aim/timing input required.
-- Counter projectile is fired at full launch speed with full exponential decay.
-- Counter projectile is **still counted as Mike's** — if it comes back, Mike must dodge it.
-- Counter projectile can damage Sonny or Mike if they cannot dodge it.
-- All current weapon modifiers and passives apply to the counter projectile.
+- Full rules and timing windows are defined in **Section 5B — Mike: Projectile Dodge**.
 
 ---
 
@@ -418,184 +396,303 @@ Attacking will end the turn. Turns can only be: **move + attack** or **attack on
 
 ## 5B. PROJECTILE SYSTEM
 
-Projectile collision with a character deals damage immediately (HP bar is decremented on contact).
+All projectiles — player-fired and enemy-fired — use the same movement, collision, and bounce logic. The only differences between projectile types are their speed profile and their `negative_bounce` value, both set at launch time.
 
-Projectiles are **independent entities** that move in real-time via `_process()`. All movement, collision, decay, and reaction logic lives in `main.gd`. `projectile.gd` handles visuals only.
+Projectiles move in real-time via `_process()` every frame. All logic lives in `main.gd`. `projectile.gd` is visuals only.
 
 ---
 
-### Velocity & Decay
+### Projectile Data
 
-Player-fired projectiles use **exponential speed decay**. Enemy projectiles use fixed speed (no decay).
-
-**Constants (tune these together):**
+Every projectile carries these properties at spawn:
 
 ```gdscript
-const PROJ_LAUNCH_SPEED   : float = ???   # px/s — tune so unobstructed range ≈ 12 hexes
-const PROJ_DECAY_RATE     : float = ???   # exponential decay coefficient (per second)
-const PROJ_MIN_SPEED      : float = PROJ_LAUNCH_SPEED * 0.03  # disappear threshold (3% of launch)
-const PROJ_NEGATIVE_BOUNCE: float = ???   # flat speed subtracted on surface impact — tune so
-                                          # post-bounce range ≈ 3–4 hexes from impact point
+var speed           : float   # current speed in px/s, updated every frame
+var direction       : Vector2 # normalized, updated on bounce
+var damage          : float   # base damage, never changes after spawn
+var negative_bounce : float   # flat px/s subtracted from speed on any collision
+var owner           : Node    # the character or enemy that fired this projectile.
+                              # null = god-owned (hits everyone including Sonny and Mike)
+var uses_decay      : bool    # true for player-fired, false for enemy-fired
+var redirect_count  : int = 0
+var is_supercharged : bool = false
 ```
 
-**Per-frame update:**
+**Owner rules:**
+- Projectile does **not** collide with its `owner`. It passes through them silently.
+- A projectile collides with and damages every other character and enemy regardless of who fired it.
+- Enemy A's projectile can hit Enemy B.
+- **Exception — god ownership:** When Sonny perfectly redirects a projectile, `owner` is set to `null`. A god-owned projectile collides with and damages everyone — Sonny, Mike, and all enemies. Sonny can still redirect a god-owned projectile. God ownership is permanent for that projectile.
+
+---
+
+### Speed Profiles
+
+**Player-fired projectiles** use exponential decay:
+
+```gdscript
+# Every frame, before moving:
+if uses_decay:
+    speed *= exp(-PROJ_DECAY_RATE * delta)
+    if speed < PROJ_MIN_SPEED:
+        _die()   # projectile disappears naturally, no collision
+        return
+```
+
+**Enemy-fired projectiles** use fixed speed — no decay. They travel at constant speed until they collide with something, at which point `negative_bounce = 9999` kills them immediately.
+
+**Constants (tune together — player projectiles only):**
+
+```gdscript
+const PROJ_LAUNCH_SPEED : float = ???               # px/s — tune for ≈12 hex unobstructed range
+const PROJ_DECAY_RATE   : float = ???               # exponential coefficient per second
+const PROJ_MIN_SPEED    : float = PROJ_LAUNCH_SPEED * 0.03  # disappear threshold (3% of launch)
+```
+
+**Design targets:**
+- Unobstructed player projectile: **≈ 12 hexes** before speed drops below `PROJ_MIN_SPEED`.
+- Post-collision player projectile: **≈ 3–4 hexes** remaining after one hit (varies with speed at moment of impact).
+
+---
+
+### Negative Bounce Values
+
+`negative_bounce` is set at spawn and never changes. It is the flat px/s subtracted from `speed` on every collision (wall, column, or character).
+
+| Projectile source | Default `negative_bounce` |
+|-------------------|--------------------------|
+| Player-fired (Mike Draw Shot, Mike counter) | `PROJ_NEGATIVE_BOUNCE` constant — tune so post-bounce range ≈ 3–4 hexes |
+| Enemy-fired | `9999.0` — guarantees death on first collision with anything |
+
+Enemy `negative_bounce` can be overridden per-attack in the enemy data dict (key: `"negative_bounce": float`) if a specific enemy attack should survive a bounce. If not specified, defaults to `9999.0`.
+
+---
+
+### Per-Frame Movement Loop
+
 ```gdscript
 func _process(delta: float) -> void:
-    speed *= exp(-PROJ_DECAY_RATE * delta)   # exponential decay
+    # 1. Apply decay (player projectiles only)
+    if uses_decay:
+        speed *= exp(-PROJ_DECAY_RATE * delta)
+        if speed < PROJ_MIN_SPEED:
+            _die()
+            return
+
+    # 2. Move
+    position += direction * speed * delta
+
+    # 3. Check collisions (in priority order)
+    _check_wall_collision()
+    _check_column_collision()
+    _check_character_collision()
+```
+
+---
+
+### Collision Detection — Hex Border
+
+All collision boundaries use the **actual hexagon border** of the occupied tile, not a circle approximation.
+
+A hexagon in flat-top orientation has 6 sides, each with a known outward normal. Collision is detected when the projectile's position crosses the hexagon boundary of a tile.
+
+**For walls and columns:** The tile itself is the hexagon. Use the side normal of the crossed edge as the bounce normal.
+
+**For characters (Sonny, Mike, enemies):** The character's occupied hex is treated as a solid hexagon boundary. Crossing any side of that hexagon = collision. Use the normal of the crossed side as the bounce normal.
+
+**Collision check order per frame:** walls → columns → characters. If multiple collisions occur in the same frame, resolve the closest one first.
+
+---
+
+### Collision Resolution
+
+The same resolution logic applies to all collision types. Only the side effects differ.
+
+```gdscript
+func _resolve_collision(surface_normal: Vector2, hit_character = null) -> void:
+    # 1. If character hit: deal damage first
+    if hit_character != null and hit_character != owner:
+        hit_character.take_damage(damage)
+
+    # 2. Reflect direction
+    direction = direction.bounce(surface_normal)
+
+    # 3. Apply speed penalty
+    speed -= negative_bounce
+
+    # 4. Check if projectile survives
     if speed < PROJ_MIN_SPEED:
-        queue_free()                          # projectile dies naturally
-        return
-    position += direction * speed * delta    # move in world space
-    _check_collisions()
+        _die()   # dies at collision point, after damage has been applied
 ```
 
-**Design targets (tune PROJ_LAUNCH_SPEED and PROJ_DECAY_RATE to hit these):**
-- Unobstructed travel: **≈ 12 hexes** before speed drops below `PROJ_MIN_SPEED`.
-- Post-bounce travel: **≈ 3–4 hexes** after a single surface hit, depending on how far the projectile had already traveled before impact (the further it traveled, the slower it was at impact, the fewer hexes it has left after the speed penalty).
+**Key points:**
+- Damage is applied before the bounce calculation. HP bar updates immediately.
+- A projectile with `negative_bounce = 9999` will always die at step 4, after dealing damage.
+- A projectile can hit the same character multiple times if its bounce trajectory re-enters their hex border. There is no immunity window.
+- There is no bounce_count. The projectile lives or dies entirely by remaining speed.
 
 ---
 
-### Surface Collision & Bounce
+### Collision Table
 
-On collision with a wall, column, or enemy (if passing through is not active):
-
-```gdscript
-# Standard vector reflection — preserves angle, no tile-snapping
-direction = direction.bounce(surface_normal)
-
-# Flat speed penalty
-speed -= PROJ_NEGATIVE_BOUNCE
-
-if speed < PROJ_MIN_SPEED:
-    queue_free()   # projectile dies at the bounce point
-```
-
-**Bounceable surfaces:**
-
-| Surface | Behavior |
-|---------|----------|
-| Walls (map edge) | Reflect direction, apply `PROJ_NEGATIVE_BOUNCE` |
-| Columns | Reflect direction, apply `PROJ_NEGATIVE_BOUNCE` |
-| Enemies | Deal damage; reflect direction, apply `PROJ_NEGATIVE_BOUNCE` (projectile continues through) |
-| Sonny | Only if reaction missed or not attempted |
-| Mike | Only if reaction missed or not attempted |
-
-There is **no bounce_count**. The projectile lives or dies entirely by its remaining speed.
+| What was hit | Owner check | Damage | Bounce |
+|--------------|-------------|--------|--------|
+| Wall (map edge) | N/A | None | Reflect + subtract `negative_bounce` |
+| Column tile | N/A | None | Reflect + subtract `negative_bounce` |
+| Character == `owner` | Skip entirely | None | No bounce, projectile continues |
+| Character ≠ `owner` | Collide | `damage` to that character | Reflect + subtract `negative_bounce` |
+| Any character, `owner == null` (god) | Collide with everyone | `damage` to that character | Reflect + subtract `negative_bounce` |
 
 ---
 
-### Sonny Redirect — Speed Interaction
+### Aim Preview (Mike Draw Shot only)
 
-On **perfect redirect** (SPACE within ±0.2s):
-
-```gdscript
-# Add speed bonus
-speed = speed + PROJ_NEGATIVE_BOUNCE * 0.5
-
-# Restart decay from this new speed (same as if projectile was freshly fired at `speed`)
-# Direction changes to mouse cursor direction
-direction = (mouse_pos - sonny_pos).normalized()
-
-redirect_count += 1
-if redirect_count >= 3:
-    is_supercharged = true
-```
-
-The decay formula is unchanged — it continues applying `exp(-PROJ_DECAY_RATE * delta)` each frame. Restarting decay simply means the speed is now higher, so the projectile travels further from this point.
-
----
-
-### Aim Preview
-
-The aim preview (aim_overlay.gd) uses the **same physics simulation** as the real projectile:
+The aim preview in `aim_overlay.gd` runs a **physics simulation** using the same constants and logic as the real projectile. It does not use a separate algorithm.
 
 ```gdscript
-# BounceTracer runs a simulation loop instead of step-based raycasting:
-var sim_speed     : float   = PROJ_LAUNCH_SPEED
-var sim_pos       : Vector2 = start
-var sim_dir       : Vector2 = direction.normalized()
-var sim_dt        : float   = 1.0 / 60.0   # simulate at 60 fps
+# Simulation loop — runs ahead of time, not in real-time
+var sim_speed : float   = PROJ_LAUNCH_SPEED
+var sim_pos   : Vector2 = mike_position
+var sim_dir   : Vector2 = shot_direction.normalized()
+var sim_dt    : float   = 1.0 / 60.0
 
 while sim_speed >= PROJ_MIN_SPEED:
     sim_speed *= exp(-PROJ_DECAY_RATE * sim_dt)
     sim_pos   += sim_dir * sim_speed * sim_dt
 
-    var collision = _check_collision(sim_pos)
-    if collision.hit_wall or collision.hit_column:
-        sim_dir    = sim_dir.bounce(collision.normal)
+    var col = _sim_check_collision(sim_pos, sim_dir)
+    if col.hit:
+        sim_dir   = sim_dir.bounce(col.normal)
         sim_speed -= PROJ_NEGATIVE_BOUNCE
-    elif collision.hit_enemy:
-        record_hit(collision.hex)
-        sim_dir    = sim_dir.bounce(collision.normal)
-        sim_speed -= PROJ_NEGATIVE_BOUNCE
+        if col.hit_character:
+            record_hit(col.character)
 
-    record_segment_point(sim_pos)
+    record_path_point(sim_pos)
 
-# The final sim_pos when speed drops below threshold is the endpoint shown on the preview.
+# sim_pos when loop ends = where the projectile dies = endpoint shown on preview
 ```
 
-The preview shows the **full path** including all bounces and the exact point where the projectile dies. The endpoint fades to indicate the projectile disappears there.
+**Preview shows:**
+- Full path from Mike to death point, including all bounces.
+- The endpoint fades/dims to indicate the projectile disappears there.
+- Enemy hex borders that would be struck are highlighted.
 
-**Critical rule:** The same constants (`PROJ_LAUNCH_SPEED`, `PROJ_DECAY_RATE`, `PROJ_NEGATIVE_BOUNCE`, `PROJ_MIN_SPEED`) must be used by both the preview simulation and the real projectile `_process()`. Never use different values for preview vs. reality.
+**Characters treated as obstacles in preview:** enemies only. Sonny and Mike are not treated as obstacles in the preview.
+
+**Critical rule:** `PROJ_LAUNCH_SPEED`, `PROJ_DECAY_RATE`, `PROJ_NEGATIVE_BOUNCE`, and `PROJ_MIN_SPEED` must be identical between the preview simulation and the real `_process()` loop. Never use different values.
 
 ---
 
-### Reaction Trigger — Sonny & Mike
+### Reaction System — Sonny & Mike
+
+Both characters can react to any incoming projectile that will cross their hex border. The reaction window is based on real-time arrival.
 
 **Contact detection (per-frame):**
-- Every frame, each live projectile checks if its current position is within `HEX_SIZE * 0.75` of a player's world position.
-- When within range, that player is marked as the **incoming target**.
-- `t = 0.0s` is defined as the moment the projectile reaches the player's world position.
-- Arrival time is estimated from: `time_to_contact = distance / current_speed`.
-- The player presses SPACE at any time; the system measures how far that press is from `t = 0.0s`.
+- Each projectile checks each frame whether its current trajectory will cross a player's hex border.
+- When a crossing is imminent, `t = 0.0s` is defined as the exact moment the projectile reaches the hex border.
+- Arrival time is estimated each frame from: `time_to_contact = distance_to_hex_border / current_speed`.
+- The player presses SPACE at any time. The system compares the press time to `t = 0.0s`.
 
 **No visual warning is shown.** The player must watch the ball and react.
 
-**Reaction window:**
-- Perfect: SPACE pressed within ±0.2s of contact.
-- OK / Normal: SPACE pressed within ±0.2s–±0.4s of contact.
-- Miss: SPACE not pressed within ±0.4s.
+**Reaction window (same for both characters):**
+- Perfect: SPACE within ±0.2s of `t = 0.0s`.
+- OK / Normal: SPACE within ±0.2s–±0.4s of `t = 0.0s`.
+- Miss: SPACE not pressed within ±0.4s → collision resolves normally (damage + bounce).
 
-**On successful dodge (normal or perfect) — projectile continues:**
-- The projectile ignores the dodging character's collision and continues in its current direction at its current speed.
-- Speed and decay are not affected by a dodge.
+**Only one reaction attempt per projectile-character crossing.** If the projectile bounces off something else and comes back, that is a new crossing and a new reaction window.
 
-**Only one reaction attempt per projectile pass.**
+---
 
+### Sonny — Projectile Redirect
+
+Sonny has no projectile of his own. He can redirect **any projectile** heading toward his hex, from any source.
+
+**On perfect redirect (SPACE within ±0.2s):**
+
+```gdscript
+# Change direction toward mouse cursor
+direction = (mouse_pos - sonny_world_pos).normalized()
+
+# Speed bonus: counteracts the negative_bounce that a collision would have cost
+speed += projectile.negative_bounce * 0.5
+
+# Ownership becomes god — hits everyone including Sonny from this point
+owner = null
+
+# Track redirects toward supercharge
+redirect_count += 1
+if redirect_count >= 3:
+    is_supercharged = true
+```
+
+- Decay continues from the new (higher) speed — it is not reset to launch speed.
+- God ownership is permanent. If Sonny redirects again, ownership stays `null`, `redirect_count` increments, and supercharge can still trigger.
+
+**On OK redirect (SPACE within ±0.2s–±0.4s):**
+- Projectile passes through Sonny's hex with no collision, no damage, no speed change, no ownership change.
+
+**On miss:**
+- Normal collision resolution: damage to Sonny, bounce, subtract `negative_bounce`.
+
+---
+
+### Mike — Projectile Dodge
+
+Mike can dodge any projectile heading toward his hex. Mike cannot redirect, but he can catch the projectile.
+
+#### On perfect dodge (SPACE within ±0.2s):
+Projectile ownerResultMike himselfProjectile deleted, 0 damage.Anyone else (enemy, god, Sonny)0 damage. Projectile deleted. Mike stores a copy of that projectile.
+Storing a caught projectile:
+
+Mike stores a copy of the projectile's damage, speed, negative_bounce, and uses_decay.
+Maximum 2 stored projectiles. If already at cap, the caught projectile is discarded and "Bag is full!" appears in red.
+If below cap, "Caught it!" appears in green.
+A counter "balls caught: N" is displayed next to Mike's name at all times (0–2).
+
+Firing stored projectiles:
+
+Stored projectiles only fire on a successful Draw Shot (perfect or hit result). A miss ("Oops!") does not trigger them.
+After the Draw Shot fires, each stored projectile fires in the same locked direction, one every 0.3s.
+All stored projectiles have owner = Mike. If any bounce back toward Mike, he must react normally.
+The queue empties and the counter resets to 0 after firing, regardless of how many were stored.
+
+#### On OK dodge (SPACE within ±0.2s–±0.4s):
+
+0 damage. Projectile passes through Mike's hex, continues in current direction at current speed unchanged.
+Applies to all projectile sources including god-owned.
+
+#### On miss:
+
+Normal collision resolution: damage to Mike, bounce, subtract negative_bounce.
 ---
 
 ### Supercharged State
 
-**Trigger:** Sonny perfectly redirects the **same projectile three times** (`redirect_count == 3`).
+**Trigger:** `redirect_count` reaches 3 on the same projectile (three perfect Sonny redirects).
 
-Each redirect tints the ball progressively more red and increases its radius by 10%.
+Each redirect: ball radius grows by 10%, color shifts progressively more red.
+At `redirect_count == 3`: ball blinks bright red — supercharged.
 
 **Supercharged behavior:**
-- Projectile blinks bright red.
-- Sonny can no longer redirect it.
-- Mike can still dodge it.
-- Speed decay continues normally — the projectile can still die from speed loss.
-- On next collision with any surface or character (other than Mike successfully dodging):
+- Sonny can still attempt to redirect it (SPACE within ±0.2s). A perfect redirect increments `redirect_count` further, god ownership and speed bonus still apply.
+- Mike can still dodge it normally.
+- Speed decay still applies — the projectile can still die from speed loss before hitting anything.
+- On the next collision with **anything** (wall, column, character) that is not Mike successfully dodging:
   - **Explodes** at impact point.
-  - Deals `original_damage + 1` to the impact tile.
-  - Deals `original_damage` to all adjacent tiles (AOE 2).
-  - Hits everything — enemies, Sonny, Mike included.
+  - Deals `damage + 1` to the impact tile's occupants.
+  - Deals `damage` to all adjacent tile occupants (AOE 2).
+  - Hits everyone — Sonny, Mike, all enemies — regardless of ownership.
 
 ```gdscript
+# On supercharged collision:
 var affected_tiles = [impact_tile] + get_adjacent_tiles(impact_tile)
 for tile in affected_tiles:
-    var dmg = original_damage + (1 if tile == impact_tile else 0)
+    var dmg = damage + (1 if tile == impact_tile else 0)
     for character in tile.occupants:
         character.take_damage(dmg)
+_die()
 ```
-
----
-
-### Enemy Projectiles
-
-Enemy ranged attacks fire projectiles at **fixed speed** with **no decay**. They travel until they hit a surface or character. The reaction system (SPACE to dodge) applies to enemy projectiles identically to player projectiles.
-
-Enemy projectile speed is defined per-attack as `"slow"` / `"medium"` / `"fast"` in the enemy data (see Section 13). These map to fixed `px/s` constants — they do not use `PROJ_LAUNCH_SPEED` or `PROJ_DECAY_RATE`.
 
 ---
 
@@ -706,7 +803,7 @@ Enemies are defined by a **data resource** (stats + attack list) and a **behavio
 
 ```
 attack.range == 1  →  melee  →  spawn dodge bar (timing minigame)
-attack.range  > 1  →  ranged →  spawn projectile (reaction minigame, no dodge bar)
+attack.range  > 1  →  ranged →  spawn projectile (no dodge bar — player reacts in real-time)
 ```
 
 ---
@@ -718,9 +815,10 @@ attack.range  > 1  →  ranged →  spawn projectile (reaction minigame, no dodg
 - If `dual_bar == true`: spawns two sequential dodge bars for that single hit, each with their own speed modifier.
 
 **Ranged (range > 1):**
-- Spawns a projectile at fixed speed (`slow` / `medium` / `fast` — no decay).
+- Spawns a projectile at fixed speed with `uses_decay = false` and `negative_bounce = 9999` (dies on first collision).
 - `perfect_window` and `ok_window` are **ignored** — the player reacts to the physical projectile (see Section 5B).
-- Damage value on the main row (or hits table if present) is the projectile's `damage` property.
+- The `speed` field (`slow` / `medium` / `fast`) maps to fixed px/s constants.
+- `negative_bounce` can be overridden per-attack in the data dict if the attack should survive a bounce.
 
 ---
 
@@ -728,9 +826,9 @@ attack.range  > 1  →  ranged →  spawn projectile (reaction minigame, no dodg
 
 An attack with `hits > 1` fires that many times **sequentially** on the same action. Each hit spawns its own dodge bar (melee) or its own projectile (ranged) independently.
 
-If all hits are identical, the main row is sufficient (`hits: N, identical`).
+If all hits are identical, the main row is sufficient. If hits differ, a **hits table** is required beneath the attack row and the main row `damage` is left as `—`.
 
-If hits differ, a **hits table** is required. The main row `damage` column is left as `—`.
+For ranged multi-hit attacks with a delay between projectiles, specify the delay in seconds in the hits table or Special column.
 
 ---
 
@@ -748,27 +846,29 @@ If hits differ, a **hits table** is required. The main row `damage` column is le
 | A1 | 1 | 1 | 1 | 1 | — | 0.20s | 0.40s | |
 
 **[AX] — Hit Details** (only if hits > 1 AND not identical)
-| Hit | Damage | Speed | Perfect Window | OK Window |
-|-----|--------|-------|----------------|-----------|
-| 1   | ...    | ...   | ...            | ...       |
+| Hit | Damage | Speed | Delay | Perfect Window | OK Window |
+|-----|--------|-------|-------|----------------|-----------|
+| 1   | ...    | ...   | 0s    | ...            | ...       |
+| 2   | ...    | ...   | 0.3s  | ...            | ...       |
 
 **Special flags**: [dual_bar | immovable | none]
 **Notes**: [behavior quirks]
 ```
 
 **Column reference:**
-- **Range**: 1 = melee. 2+ = ranged.
+- **Range**: 1 = melee (dodge bar). 2+ = ranged (projectile, dies on first hit).
 - **Damage**: base damage per hit. Use `—` if hits table overrides it.
 - **AOE**: 1 = target only. 2 = target + adjacent ring.
 - **Hits**: how many times this attack fires per action.
 - **Speed**: `—` for melee. `slow` / `medium` / `fast` for ranged (fixed speed, no decay).
 - **Perfect / OK Window**: melee only. Use `—` for ranged.
+- **Delay** (hits table only): seconds between projectile spawns for multi-hit ranged attacks.
 
 ---
 
 ### Grunt — G (red)
 
-**HP**: 5
+**HP**: 3
 **Actions**: 2
 **Move**: 2 hexes
 **Behavior**: Aggressive. Moves toward the nearest player. Attacks if adjacent. If already adjacent to one player, repositions to remain adjacent while minimizing distance to the second player. Attacking ends turn.
@@ -782,26 +882,27 @@ If hits differ, a **hits table** is required. The main row `damage` column is le
 
 ---
 
-### Archer — A (blue) — NOT YET IMPLEMENTED
+### Archer — A (purple)
 
-**HP**: 3
-**Actions**: 2
+**HP**: 2
+**Actions**: 1
 **Move**: 1 hex
-**Behavior**: Keeps 2–5 hexes distance from the nearest player. Moves away if a player is adjacent. Attacks if player is within range 4. Attacking ends turn.
+**Behavior**: Stays 2–5 hexes away from the nearest player. Moves away if a player is adjacent. Attacks if a player is within 4 hexes. Attacking ends turn.
 
 | # | Range | Damage | AOE | Hits | Speed | Perfect Window | OK Window | Special |
 |---|-------|--------|-----|------|-------|----------------|-----------|---------|
-| A1 | 4 | 2 | 1 | 1 | medium | — | — | |
+| A1 | 4 | 1 | 1 | 1 | normal | — | — | Single projectile, dies on hit |
 | A2 | 4 | — | 1 | 2 | — | — | — | see hits table |
 
 **A2 — Hit Details**
-
-| Hit | Damage | Speed | Perfect Window | OK Window |
-|-----|--------|-------|----------------|-----------|
-| 1 | 0.5 | medium | — | — |
-| 2 | 0.5 | fast | — | — |
+| Hit | Damage | Speed | Delay | Perfect Window | OK Window |
+|-----|--------|-------|-------|----------------|-----------|
+| 1 | 0.5 | fast | 0s | — | — |
+| 2 | 0.5 | fast | 0.3s | — | — |
 
 **Special flags**: none
+
+**Notes**: All Archer projectiles use `negative_bounce = 9999` (die on first collision). The second A2 projectile is fired 0.3s after the first.
 
 ---
 
@@ -834,6 +935,8 @@ If hits differ, a **hits table** is required. The main row `damage` column is le
 ---
 
 ### Enemy AI Priority (shared logic)
+
+Evaluated each action in order. First matching condition wins.
 
 ```
 1. Adjacent to a player AND can attack      → attack
@@ -1022,11 +1125,11 @@ const ZONE_DODGE           := 0.08
 const ACT_TIME_LIMIT       := 100
 const ACT_DISTANCE         := 100
 
-# Projectile velocity system (player-fired only)
+# Projectile velocity system
 const PROJ_LAUNCH_SPEED    := ???     # tune for ≈12 hex unobstructed range
 const PROJ_DECAY_RATE      := ???     # exponential decay coefficient per second
 const PROJ_MIN_SPEED       := PROJ_LAUNCH_SPEED * 0.03
-const PROJ_NEGATIVE_BOUNCE := ???     # flat px/s subtracted on surface impact
+const PROJ_NEGATIVE_BOUNCE := ???     # flat px/s subtracted on surface impact (player projectiles)
 ```
 
 ### Phase Enum
@@ -1058,6 +1161,7 @@ enum Phase {
 | Floor progression (10 floors) | ✅ Done | |
 | Item system (prefix rolling) | ✅ Done | |
 | Two-character system (Sonny + Mike) | ✅ Done | Both characters spawned and active via `PLAYER_ORDER` + `CHARACTER_PRESETS` in `Player.gd` |
+| Tab to switch character | ✅ Done | |
 | Sonny charge bar (Boong Q) | ✅ Done | `sonny_charge_bar.gd` — full drift/hold/release/resolve flow |
 | Mike Draw Shot (aim + timing) | ✅ Done | `mike_timing_bar.gd` — aim mode, drag-center oscillation, resolve on release |
 | Projectile system — tween-based (old) | ✅ Done | `projectile.gd` (visual) + `BounceTracer` in `bounce.gd` + tracking loop in `main.gd` |
@@ -1065,16 +1169,15 @@ enum Phase {
 | Mike dodge reaction + counter | ✅ Done | SPACE reaction window, counter-attack on perfect dodge of enemy projectile |
 | Supercharged projectile | ✅ Done | Triggers at `redirect_count == 3`, blinking red, AoE explosion |
 | Enemy data-driven attack system | ✅ Done | `enemy.gd` — all attacks as dicts with `range`, `damage`, `hits`, `dual_bar`, etc. |
-| Archer enemy data | ✅ Done | Defined in `enemy.gd` with correct A1/A2 hit table |
+| Archer enemy data | ✅ Done | Defined in `enemy.gd` |
 | Assassin enemy data | ✅ Done | Defined in `enemy.gd` with `dual_bar: true`, `speed_mults: [0.80, 1.30]` |
 | Sonny Bomb (W) | ✅ Done | Implemented as enemy type "bomb" with explosion on death |
 | Mike Grapple Gun (W) | ✅ Done | Pull logic, immovable flag, 2 uses per map |
-| **Projectile velocity decay system** | ❌ Not started | Replaces tween + BounceTracer with `_process()` physics loop. Requires rewrite of `bounce.gd` (physics sim), `projectile.gd` (visual only, no logic change), and projectile handling in `main.gd`. Old system remains until new one is complete. |
-Already have it
+| World map (nodes, timer, travel) | ✅ Done | |
+| **Projectile velocity decay system** | ❌ Not started | Replaces tween + BounceTracer with `_process()` physics loop. Requires rewrite of `bounce.gd` (physics sim with hex-border collision), projectile handling in `main.gd` (ownership, `negative_bounce`, `uses_decay`), and `aim_overlay.gd` (physics preview). Old tween system remains until complete. |
 | Auto camera snap to targeted character | ❌ Not started | |
 | Archer enemy — combat behavior | ❌ Not started | Data defined; keep-distance AI not yet in `plan_action` |
 | Assassin enemy — combat behavior | ❌ Not started | Data defined; dual bar spawn not yet wired in `main.gd` |
-Already have it
 | Skills & passives | ❌ Not started | |
 | Sonny Boong W upgrades | ❌ Not started | |
 | Mike Slingshot W upgrades | ❌ Not started | |
@@ -1082,4 +1185,4 @@ Already have it
 
 ---
 
-*Version 1.6 — Projectile system reworked: exponential velocity decay, physics-loop movement via `_process()`, `PROJ_NEGATIVE_BOUNCE` flat speed penalty on surface impact, Sonny redirect grants `NEGATIVE_BOUNCE * 0.5` speed with decay restart. `bounce_count` concept removed. BounceTracer rewritten as physics simulation for accurate aim preview. Enemy projectiles retain fixed speed. Old tween-based system remains in code until new system is implemented.*
+*Version 1.7 — Merged new design.md (truth for all non-projectile content) with rewritten Section 5B (unified projectile system: ownership model, hex-border collision, negative_bounce, exponential decay for player projectiles, fixed-speed for enemies). Archer updated to match new projectile rules. Sonny/Mike reaction sections in Section 5 now point to 5B as the source of truth.*

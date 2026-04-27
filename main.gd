@@ -66,7 +66,8 @@ var dodge_target_player_idx : int  = 0
 
 # Live projectile tracking (Section 5B)
 # Each entry: {node, source_idx, source_enemy, damage, speed, direction,
-#              is_player_proj, redirect_count, is_supercharged, elapsed,
+#              uses_decay, negative_bounce, is_god_owned,
+#              redirect_count, is_supercharged, elapsed,
 #              contact_est {pi:float}, reaction_done {pi:bool}, pass_through {pi:bool},
 #              enemies_hit {hex:bool}, done}
 var live_proj_states      : Array = []
@@ -94,7 +95,10 @@ var bomb_mode        : bool = false
 
 # Mike Grapple (W)
 var mike_grappling : bool = false
-var mike_w_uses    : int  = 2
+var mike_w_uses    : int  = 1
+
+# Mike caught-projectile bag (max 2; fires after Draw Shot)
+var mike_caught_projectiles : Array = []
 
 # ═══════════════════════════════════════════════════════════
 #  UI NODES
@@ -108,6 +112,7 @@ var dead_label    : Label = null
 var timer_label   : Label = null
 var undo_label    : Label = null
 var reset_label   : Label = null
+var end_turn_confirm_panel : Panel = null
 
 var minutes_left  : int   = 180
 
@@ -418,11 +423,8 @@ func _is_neighbor(a: Vector2i, b: Vector2i) -> bool:
 # ═══════════════════════════════════════════════════════════
 
 func _calculate_damage(base_dmg: float, hit_type: String, _target) -> int:
-	var current_player = players[current_player_index]
 	var dmg = base_dmg
-	dmg *= (1.0 + current_player.perfection * 0.10)
 	match hit_type:
-		"crit": dmg *= 1.50
 		"miss": dmg *= 0.50
 	return int(round(dmg))
 
@@ -459,7 +461,7 @@ func _execute_attack(mode: String, hit_type: String) -> void:
 		attack_mode  = ""
 		attack_tiles = []
 
-		_launch_projectile(captured_idx, null, captured_dmg, from_world, dir, 0, 0, false)
+		_launch_projectile(captured_idx, null, captured_dmg, from_world, dir)
 		_update_valid_moves()
 		_refresh_tile_colors()
 		_refresh_ui()
@@ -611,17 +613,8 @@ func _on_mike_timing_resolved(result: String) -> void:
 	var captured_idx = current_player_index
 	var wd           = players[captured_idx].get_weapon_data()
 	var base_dmg     = float(wd.get("q_dmg", 1))
-	# Map timing result to damage hit_type
-	var dmg_type = "crit" if result == "perfect" else ("hit" if result == "hit" else "miss")
+	var dmg_type = "hit" if result == "perfect" else ("hit" if result == "hit" else "miss")
 	var dmg      = _calculate_damage(base_dmg, dmg_type, null)
-
-	match result:
-		"miss":
-			players[captured_idx].perfection = 0
-		"perfect":
-			players[captured_idx].perfection = mini(
-				players[captured_idx].perfection + 1,
-				players[captured_idx].perfection_cap)
 
 	attack_committed_this_round = true
 	players[captured_idx].has_attacked = true
@@ -636,11 +629,11 @@ func _on_mike_timing_resolved(result: String) -> void:
 		return
 
 	_fire_mike_projectile(captured_idx, dmg)
+	_fire_mike_stored_projectiles(captured_idx)
 
-func _fire_mike_projectile(source_idx: int, _dmg: int) -> void:
-	var from_world = players[source_idx].position
-	_launch_projectile(source_idx, null, 1, from_world, mike_shot_dir,
-		players[source_idx].get_bounce_count(), 0, false)
+func _fire_mike_projectile(source_idx: int, dmg: int) -> void:
+	var from_world : Vector2 = players[source_idx].position
+	_launch_projectile(source_idx, null, dmg, from_world, mike_shot_dir)
 
 # ── Sonny's Charge Bar (Boong Q) ─────────────────────────────────────────────
 
@@ -716,9 +709,30 @@ func _enemy_ranged_attack(enemy: Node, target_idx: int, atk: Dictionary) -> void
 	current_player_index = target_idx
 	_refresh_ui()
 	var target_player = players[target_idx]
-	var dir = (target_player.position - enemy.position).normalized()
-	var spd = PROJ_ENEMY_SPEEDS.get(atk.get("speed", "medium"), PROJ_ENEMY_SPEEDS["medium"])
-	_launch_projectile(-1, enemy, atk.get("damage", 1), enemy.position, dir, 0, 0, false, spd)
+	var dir : Vector2 = (target_player.position - enemy.position).normalized()
+	var nb  : float   = atk.get("negative_bounce", -1.0)
+
+	var hit_details : Array = atk.get("hit_details", [])
+	if hit_details.is_empty():
+		var spd : float = PROJ_ENEMY_SPEEDS.get(atk.get("speed", "medium"), PROJ_ENEMY_SPEEDS["medium"])
+		_launch_projectile(-1, enemy, atk.get("damage", 1.0), enemy.position, dir,
+			0, false, nb, spd)
+	else:
+		for hd : Dictionary in hit_details:
+			var delay : float = hd.get("delay", 0.0)
+			var dmg   : float = hd.get("damage", atk.get("damage", 1.0))
+			var spd   : float = PROJ_ENEMY_SPEEDS.get(
+				hd.get("speed", atk.get("speed", "medium")), PROJ_ENEMY_SPEEDS["medium"])
+			var start : Vector2 = enemy.position
+			if delay <= 0.001:
+				_launch_projectile(-1, enemy, dmg, start, dir, 0, false, nb, spd)
+			else:
+				var t := create_tween()
+				t.tween_interval(delay)
+				t.tween_callback(func():
+					if is_instance_valid(enemy) and not players.is_empty():
+						_launch_projectile(-1, enemy, dmg, enemy.position, dir, 0, false, nb, spd)
+				)
 
 # ═══════════════════════════════════════════════════════════
 #  CHARACTER SWITCHING
@@ -817,72 +831,79 @@ func _get_grapple_targets() -> Array:
 	var result : Array = []
 	for e in enemies:
 		result.append(Vector2i(e.grid_col, e.grid_row))
-	for ct in column_tiles.keys():
-		result.append(ct)
-	# Other players (e.g. Sonny) — pulled toward Mike
 	for i in range(players.size()):
 		if i != current_player_index:
 			result.append(player_positions[i])
-	# Map edge tiles — treated as wall anchors (Mike gets pulled to adj hex)
-	for key in tiles:
-		if key.x == 0 or key.x == GRID_COLS - 1 or key.y == 0 or key.y == GRID_ROWS - 1:
-			if key not in result:
-				result.append(key)
 	return result
 
-func _execute_grapple(target_hex: Vector2i) -> void:
+func _execute_grapple(clicked_hex: Vector2i) -> void:
 	var mike     = players[current_player_index]
 	var mike_hex = Vector2i(mike.grid_col, mike.grid_row)
+	if clicked_hex == mike_hex: return
 
-	var target_enemy = _get_enemy_at(target_hex)
-	var target_player_idx = _get_player_at(target_hex)
+	# ── 1. Ray-cast the hook along aim direction ──────────────────────────
+	var offset   := _grid_center_offset()
+	var mike_px  := _hex_to_pixel(mike_hex.x, mike_hex.y) + offset
+	var aim_px   := _hex_to_pixel(clicked_hex.x, clicked_hex.y) + offset
+	var dir      : Vector2 = (aim_px - mike_px).normalized()
 
-	if target_enemy != null:
-		target_enemy.take_damage(1)
-		_spawn_damage_float(target_enemy.position, 1)
-		if target_enemy.hp <= 0:
-			_on_enemy_killed(target_enemy)
-		elif not target_enemy.immovable:
-			var dest = _best_adj_hex_of(mike_hex, target_hex)
-			if dest != Vector2i(-1, -1):
-				target_enemy.grid_col = dest.x
-				target_enemy.grid_row = dest.y
-				_move_entity_smooth(target_enemy, dest.x, dest.y)
-		else:
-			var dest = _best_adj_hex_of(target_hex, mike_hex)
-			if dest != Vector2i(-1, -1):
-				mike.grid_col = dest.x
-				mike.grid_row = dest.y
-				player_positions[current_player_index] = dest
-				_move_entity_smooth(mike, dest.x, dest.y)
-	elif target_hex in column_tiles:
-		var dest = _best_adj_hex_of(target_hex, mike_hex)
-		if dest != Vector2i(-1, -1):
-			mike.grid_col = dest.x
-			mike.grid_row = dest.y
-			player_positions[current_player_index] = dest
-			_move_entity_smooth(mike, dest.x, dest.y)
-	elif target_player_idx >= 0 and target_player_idx != current_player_index:
-		# Pull the other player (Sonny) to best adj hex of Mike
-		var dest = _best_adj_hex_of(mike_hex, target_hex)
-		if dest != Vector2i(-1, -1):
-			var tp = players[target_player_idx]
-			tp.grid_col = dest.x
-			tp.grid_row = dest.y
-			player_positions[target_player_idx] = dest
-			_move_entity_smooth(tp, dest.x, dest.y)
-	elif target_hex.x == 0 or target_hex.x == GRID_COLS - 1 \
-	  or target_hex.y == 0 or target_hex.y == GRID_ROWS - 1:
-		# Wall grapple: Mike is pulled to best adj hex of the edge tile
-		var dest = _best_adj_hex_of(target_hex, mike_hex)
-		if dest != Vector2i(-1, -1):
-			mike.grid_col = dest.x
-			mike.grid_row = dest.y
-			player_positions[current_player_index] = dest
-			_move_entity_smooth(mike, dest.x, dest.y)
-	else:
+	var visited  : Dictionary = {}
+	visited[mike_hex] = true
+	var cur_px   : Vector2 = mike_px
+	var step_px  : float   = HEX_SIZE * 0.4
+	var max_dist : float   = (GRID_COLS + GRID_ROWS) * HEX_SIZE * 2.0
+
+	var hooked_enemy      : Node = null
+	var hooked_player_idx : int  = -1
+
+	var dist_walked : float = 0.0
+	while dist_walked < max_dist:
+		cur_px      += dir * step_px
+		dist_walked += step_px
+		var hex : Vector2i = _pixel_to_hex(cur_px)
+		if not tiles.has(hex): break      # left the grid
+		if hex in visited: continue
+		visited[hex] = true
+
+		var e = _get_enemy_at(hex)
+		if e != null:
+			if e == sonny_bomb_enemy: continue   # phase through Sonny's bomb
+			hooked_enemy = e
+			break
+
+		var pi = _get_player_at(hex)
+		if pi >= 0 and pi != current_player_index:
+			hooked_player_idx = pi
+			break
+
+	# ── 2. Nothing hit → refund the use ──────────────────────────────────
+	if hooked_enemy == null and hooked_player_idx < 0:
+		mike_grappling = false
+		attack_mode    = ""
+		attack_tiles   = []
+		_refresh_tile_colors()
+		_refresh_ui()
 		return
 
+	# ── 3. Apply grab damage ──────────────────────────────────────────────
+	if hooked_enemy != null:
+		hooked_enemy.take_damage(1)
+		_spawn_damage_float(hooked_enemy.position, 1)
+		if hooked_enemy.hp <= 0:
+			_on_enemy_killed(hooked_enemy)
+			_finish_grapple()
+			return
+	# Sonny: 0 damage on grab — no action needed
+
+	# ── 4. Pull target toward Mike ────────────────────────────────────────
+	if hooked_enemy != null:
+		_pull_entity_toward(hooked_enemy, mike_hex, false, -1)
+	else:
+		_pull_entity_toward(players[hooked_player_idx], mike_hex, true, hooked_player_idx)
+
+	_finish_grapple()
+
+func _finish_grapple() -> void:
 	mike_w_uses   -= 1
 	mike_grappling = false
 	attack_mode    = ""
@@ -895,6 +916,77 @@ func _execute_grapple(target_hex: Vector2i) -> void:
 	_refresh_ui()
 	if enemies.is_empty():
 		_on_floor_cleared()
+
+# Drag `target` one hex at a time toward `toward_hex`, respecting full collision.
+func _pull_entity_toward(target: Node, toward_hex: Vector2i,
+		is_player: bool, player_idx: int) -> void:
+	var max_steps : int = GRID_COLS + GRID_ROWS
+	for _i in range(max_steps):
+		var cur_hex := Vector2i(target.grid_col, target.grid_row)
+		if _hex_dist(cur_hex.x, cur_hex.y, toward_hex.x, toward_hex.y) <= 1:
+			break  # already adjacent to Mike — can't go further
+
+		# Best neighbor aligned toward Mike
+		var next_hex := _pull_next_step(cur_hex, toward_hex)
+		if next_hex == Vector2i(-1, -1): break
+
+		# Stop short of Mike's tile
+		if next_hex == toward_hex: break
+
+		# Blocked by column
+		if next_hex in column_tiles:
+			target.take_damage(1)
+			_spawn_damage_float(target.position, 1)
+			if not is_player and target.hp <= 0: _on_enemy_killed(target)
+			break
+
+		# Blocked by impassable / out-of-bounds tile
+		if not tiles.has(next_hex) or not is_valid_and_passable(next_hex.x, next_hex.y):
+			target.take_damage(1)
+			_spawn_damage_float(target.position, 1)
+			if not is_player and target.hp <= 0: _on_enemy_killed(target)
+			break
+
+		# Blocked by Sonny's bomb — bomb takes 1 damage and explodes
+		var e_at := _get_enemy_at(next_hex)
+		if e_at != null and e_at == sonny_bomb_enemy:
+			e_at.take_damage(1)
+			_spawn_damage_float(e_at.position, 1)
+			if e_at.hp <= 0: _on_enemy_killed(e_at)
+			target.take_damage(1)
+			_spawn_damage_float(target.position, 1)
+			if not is_player and target.hp <= 0: _on_enemy_killed(target)
+			break
+
+		# Blocked by any other character
+		if e_at != null or _get_player_at(next_hex) >= 0:
+			target.take_damage(1)
+			_spawn_damage_float(target.position, 1)
+			if not is_player and target.hp <= 0: _on_enemy_killed(target)
+			break
+
+		# Clear — move one step
+		target.grid_col = next_hex.x
+		target.grid_row = next_hex.y
+		if is_player:
+			player_positions[player_idx] = next_hex
+		_move_entity_smooth(target, next_hex.x, next_hex.y)
+
+# Neighbor of from_hex that is most aligned toward toward_hex.
+func _pull_next_step(from_hex: Vector2i, toward_hex: Vector2i) -> Vector2i:
+	var from_px   := _hex_to_pixel(from_hex.x, from_hex.y)
+	var toward_px := _hex_to_pixel(toward_hex.x, toward_hex.y)
+	var dir       : Vector2 = (toward_px - from_px).normalized()
+	var best      := Vector2i(-1, -1)
+	var best_dot  := -INF
+	for nb : Vector2i in _get_neighbors(from_hex.x, from_hex.y):
+		var nb_px  := _hex_to_pixel(nb.x, nb.y)
+		var nb_dir : Vector2 = (nb_px - from_px).normalized()
+		var dot    : float   = dir.dot(nb_dir)
+		if dot > best_dot:
+			best_dot = dot
+			best     = nb
+	return best
 
 func _best_adj_hex_of(center: Vector2i, mover_hex: Vector2i) -> Vector2i:
 	var occupied : Dictionary = {}
@@ -915,34 +1007,95 @@ func _best_adj_hex_of(center: Vector2i, mover_hex: Vector2i) -> Vector2i:
 #  PROJECTILE SYSTEM — Section 5B
 # ═══════════════════════════════════════════════════════════
 
-const PROJ_LAUNCH_SPEED    = 600.0   # px/s — tunes for ≈12 hex unobstructed range
-const PROJ_DECAY_RATE      = 0.85   # exponential decay coefficient per second
-const PROJ_NEGATIVE_BOUNCE = 200.0  # flat px/s subtracted on surface/entity impact
-const PROJ_MIN_SPEED       = PROJ_LAUNCH_SPEED * 0.03  # 18 px/s — disappear threshold
+const PROJ_LAUNCH_SPEED    : float = 600.0   # px/s — ≈12 hex unobstructed range
+const PROJ_DECAY_RATE      : float = 0.85    # exponential decay per second
+const PROJ_NEGATIVE_BOUNCE : float = 200.0   # flat px/s subtracted on impact (player projectiles)
+const PROJ_MIN_SPEED       : float = PROJ_LAUNCH_SPEED * 0.03   # 18 px/s disappear threshold
+const PROJ_REACT_PERFECT   : float = 0.20    # ±0.2 s from contact = perfect
+const PROJ_REACT_OK        : float = 0.40    # ±0.4 s from contact = ok / dodge
+const PROJ_ENEMY_SPEEDS    : Dictionary = {
+	"slow": 120.0, "medium": 220.0, "fast": 360.0, "very_fast": 500.0, "ultra_fast": 700.0
+}
 
-# Modifier-affected runtime copies — equal to base consts until modifiers change them
+# Modifier-affected runtime copies — equal to base consts until items change them
 var CURRENT_PROJ_LAUNCH_SPEED    : float = PROJ_LAUNCH_SPEED
 var CURRENT_PROJ_DECAY_RATE      : float = PROJ_DECAY_RATE
 var CURRENT_PROJ_NEGATIVE_BOUNCE : float = PROJ_NEGATIVE_BOUNCE
-const PROJ_REACT_PERFECT   = 0.20   # ±0.2 s from contact = perfect
-const PROJ_REACT_OK        = 0.40   # ±0.4 s from contact = ok / dodge
-const PROJ_HIT_RADIUS      = 0.75   # fraction of HEX_SIZE for player contact range
-const PROJ_ENEMY_SPEEDS    = {"slow": 120.0, "medium": 220.0, "fast": 360.0}
+
+# ─── Geometry helpers ─────────────────────────────────────────────────────────
+
+# Returns t ∈ [0,1] for segment A→B intersecting segment C→D, or -1.
+func _seg_t(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> float:
+	var r   := b - a
+	var s   := d - c
+	var rxs := r.x * s.y - r.y * s.x
+	if absf(rxs) < 0.001: return -1.0
+	var t := ((c.x - a.x) * s.y - (c.y - a.y) * s.x) / rxs
+	var u := ((c.x - a.x) * r.y - (c.y - a.y) * r.x) / rxs
+	if t >= 0.0 and t <= 1.0 and u >= 0.0 and u <= 1.0: return t
+	return -1.0
+
+# Outward normal of the first hex edge crossed by segment prev→new (inward crossings only).
+# Flat-top hex, vertex radius = hex_size. Returns Vector2.ZERO if no inward crossing.
+func _hex_crossing_normal(hex_center: Vector2, hex_size: float,
+		prev_pos: Vector2, new_pos: Vector2) -> Vector2:
+	var best_t      := 2.0
+	var best_normal := Vector2.ZERO
+	var motion      := new_pos - prev_pos
+	for i in 6:
+		var v0 := hex_center + Vector2(cos(deg_to_rad(i * 60.0)),       sin(deg_to_rad(i * 60.0)))       * hex_size
+		var v1 := hex_center + Vector2(cos(deg_to_rad((i + 1) * 60.0)), sin(deg_to_rad((i + 1) * 60.0))) * hex_size
+		var t  := _seg_t(prev_pos, new_pos, v0, v1)
+		if t < 0.0 or t >= best_t: continue
+		var n  := ((v0 + v1) * 0.5 - hex_center).normalized()
+		if motion.dot(n) >= 0.0: continue   # outward crossing — skip
+		best_t      = t
+		best_normal = n
+	return best_normal
+
+# Returns t ∈ [0,1] for first inward hex-border crossing along ray pos+dir*max_dist, or -1.
+func _hex_ray_t(hex_center: Vector2, hex_size: float,
+		pos: Vector2, dir: Vector2, max_dist: float) -> float:
+	var ray_end := pos + dir * max_dist
+	var best    := -1.0
+	for i in 6:
+		var v0 := hex_center + Vector2(cos(deg_to_rad(i * 60.0)),       sin(deg_to_rad(i * 60.0)))       * hex_size
+		var v1 := hex_center + Vector2(cos(deg_to_rad((i + 1) * 60.0)), sin(deg_to_rad((i + 1) * 60.0))) * hex_size
+		var t  := _seg_t(pos, ray_end, v0, v1)
+		if t < 0.0: continue
+		var n  := ((v0 + v1) * 0.5 - hex_center).normalized()
+		if dir.dot(n) >= 0.0: continue   # outward — skip
+		if best < 0.0 or t < best: best = t
+	return best
 
 # ─── Launch ───────────────────────────────────────────────────────────────────
-#  source_idx   = player index who fired (-1 for enemy)
-#  source_enemy = enemy node that fired (null if player)
-#  fixed_speed  = px/s for enemy projectiles (ignored for player projectiles)
+# source_idx              = player index who fired (-1 for enemy).
+# source_enemy            = enemy node that fired (null if player).
+# override_negative_bounce = if >= 0, overrides the per-source default.
+# enemy_speed             = px/s for enemy projectiles (ignored for player projectiles).
 func _launch_projectile(source_idx: int, source_enemy: Node,
-						 damage: int, start_pos: Vector2,
-						 direction: Vector2, _bounce_count: int,
-						 redirect_count: int = 0, is_supercharged: bool = false,
-						 fixed_speed: float = 0.0) -> void:
-	var is_player_proj = source_idx >= 0
-	var init_speed     = CURRENT_PROJ_LAUNCH_SPEED if is_player_proj \
-						 else (fixed_speed if fixed_speed > 0.0 else PROJ_ENEMY_SPEEDS["medium"])
+		damage: float, start_pos: Vector2, direction: Vector2,
+		redirect_count: int = 0, is_supercharged: bool = false,
+		override_negative_bounce: float = -1.0,
+		enemy_speed: float = 0.0) -> void:
+	var uses_decay := source_idx >= 0
+	var init_speed : float
+	if uses_decay:
+		init_speed = CURRENT_PROJ_LAUNCH_SPEED
+	elif enemy_speed > 0.0:
+		init_speed = enemy_speed
+	else:
+		init_speed = PROJ_ENEMY_SPEEDS["medium"]
 
-	var proj = Node2D.new()
+	var neg_bounce : float
+	if override_negative_bounce >= 0.0:
+		neg_bounce = override_negative_bounce
+	elif uses_decay:
+		neg_bounce = CURRENT_PROJ_NEGATIVE_BOUNCE
+	else:
+		neg_bounce = 9999.0
+
+	var proj := Node2D.new()
 	proj.set_script(ProjectileScript)
 	proj.z_index         = 50
 	proj.redirect_count  = redirect_count
@@ -950,42 +1103,42 @@ func _launch_projectile(source_idx: int, source_enemy: Node,
 	proj.position        = start_pos
 	add_child(proj)
 
-	# Source player starts immune (pass_through prevents self-contact)
 	var reaction_done : Dictionary = {}
 	var pass_through  : Dictionary = {}
 	if source_idx >= 0:
 		reaction_done[source_idx] = true
 		pass_through[source_idx]  = true
 
-	var state : Dictionary = {
-		"node":           proj,
-		"source_idx":     source_idx,
-		"source_enemy":   source_enemy,
-		"damage":         damage,
-		"speed":          init_speed,
-		"direction":      direction.normalized(),
-		"is_player_proj": is_player_proj,
-		"redirect_count": redirect_count,
+	live_proj_states.append({
+		"node":            proj,
+		"source_idx":      source_idx,
+		"source_enemy":    source_enemy,
+		"damage":          damage,
+		"speed":           init_speed,
+		"direction":       direction.normalized(),
+		"uses_decay":      uses_decay,
+		"negative_bounce": neg_bounce,
+		"is_god_owned":    false,
+		"redirect_count":  redirect_count,
 		"is_supercharged": is_supercharged,
-		"elapsed":        0.0,
-		"contact_est":    {},
-		"reaction_done":  reaction_done,
-		"pass_through":   pass_through,
-		"enemies_hit":    {},
-		"done":           false,
-	}
-	live_proj_states.append(state)
+		"elapsed":         0.0,
+		"contact_est":     {},
+		"player_crossed":  {},
+		"reaction_done":   reaction_done,
+		"pass_through":    pass_through,
+		"enemies_hit":     {},
+		"done":            false,
+	})
 	_last_proj_source_idx = source_idx
 	phase = Phase.DODGE_PHASE
 
 
-
-# ─── Wall normal helper ────────────────────────────────────────────────────────
+# ─── Wall normal helpers ──────────────────────────────────────────────────────
 func _proj_wall_normal(pos: Vector2) -> Vector2:
 	var n := Vector2.ZERO
-	if   pos.x < grid_pixel_bounds.position.x:                         n.x =  1.0
+	if   pos.x < grid_pixel_bounds.position.x:                            n.x =  1.0
 	elif pos.x > grid_pixel_bounds.position.x + grid_pixel_bounds.size.x: n.x = -1.0
-	if   pos.y < grid_pixel_bounds.position.y:                         n.y =  1.0
+	if   pos.y < grid_pixel_bounds.position.y:                            n.y =  1.0
 	elif pos.y > grid_pixel_bounds.position.y + grid_pixel_bounds.size.y: n.y = -1.0
 	return n.normalized() if n != Vector2.ZERO else Vector2.RIGHT
 
@@ -997,7 +1150,7 @@ func _clamp_to_bounds(pos: Vector2) -> Vector2:
 			grid_pixel_bounds.position.y + grid_pixel_bounds.size.y)
 	)
 
-# ─── Per-frame physics loop ─────────────────────────────────────────────────────
+# ─── Per-frame physics loop ──────────────────────────────────────────────────
 func _process_live_projectiles(delta: float) -> void:
 	if phase == Phase.DEAD: return
 
@@ -1009,113 +1162,131 @@ func _process_live_projectiles(delta: float) -> void:
 			continue
 
 		state.elapsed += delta
+		var prev_pos  : Vector2 = proj.position
 
-		# Speed decay (player projs only; enemy projs use fixed speed)
-		if state.is_player_proj:
+		# ── 1. Decay ─────────────────────────────────────────────────────────
+		if state.uses_decay:
 			state.speed *= exp(-CURRENT_PROJ_DECAY_RATE * delta)
-
-		if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
+		if state.speed < PROJ_MIN_SPEED:
 			_proj_finalize(state)
 			continue
 
-		var new_pos : Vector2 = proj.position + state.direction * state.speed * delta
+		var new_pos : Vector2 = prev_pos + (state.direction as Vector2) * (state.speed as float) * delta
 
-		# ── Wall collision ─────────────────────────────────────────────────────
+		# ── 2. Wall collision ─────────────────────────────────────────────────
 		if not grid_pixel_bounds.has_point(new_pos):
-			var normal = _proj_wall_normal(new_pos)
-			proj.position = _clamp_to_bounds(proj.position)
+			new_pos = _clamp_to_bounds(new_pos)
+			var wall_n := _proj_wall_normal(new_pos)
 			if state.is_supercharged:
-				_proj_supercharge_explode(state.damage, proj.position)
-				state.done = true
-				proj.queue_free()
-				live_proj_states.erase(state)
-				if live_proj_states.is_empty() and phase == Phase.DODGE_PHASE:
-					_proj_transition()
+				_proj_supercharge_explode(state.damage, new_pos)
+				_proj_die(state)
 				continue
-			state.direction = state.direction.bounce(normal)
-			state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
-			if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
+			state.direction  = state.direction.bounce(wall_n)
+			state.speed     -= state.negative_bounce
+			if state.speed < PROJ_MIN_SPEED:
 				_proj_finalize(state)
 			continue
 
-		# ── Column collision ───────────────────────────────────────────────────
-		var new_hex : Vector2i = _pixel_to_hex(new_pos)
+		# ── 3. Column collision ───────────────────────────────────────────────
+		var new_hex := _pixel_to_hex(new_pos)
 		if new_hex in column_tiles:
-			var col_px : Vector2 = _hex_to_pixel(new_hex.x, new_hex.y) + _grid_center_offset()
-			var n      : Vector2 = proj.position - col_px
-			n = n.normalized() if n.length_squared() > 0.01 else Vector2.UP
+			var col_px := _hex_to_pixel(new_hex.x, new_hex.y) + _grid_center_offset()
+			var col_d  := new_pos - col_px
+			var col_n  := col_d.normalized() if col_d.length_squared() > 0.01 else Vector2.UP
 			if state.is_supercharged:
-				_proj_supercharge_explode(state.damage, proj.position)
-				state.done = true
-				proj.queue_free()
-				live_proj_states.erase(state)
-				if live_proj_states.is_empty() and phase == Phase.DODGE_PHASE:
-					_proj_transition()
+				_proj_supercharge_explode(state.damage, prev_pos)
+				_proj_die(state)
 				continue
-			state.direction = state.direction.bounce(n)
-			state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
-			if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
+			state.direction  = state.direction.bounce(col_n)
+			state.speed     -= state.negative_bounce
+			if state.speed < PROJ_MIN_SPEED:
 				_proj_finalize(state)
 			continue
 
+		# ── 4. Move ───────────────────────────────────────────────────────────
 		proj.position = new_pos
-		var cur_hex : Vector2i = _pixel_to_hex(proj.position)
+		var cur_hex   := _pixel_to_hex(proj.position)
 
-		# ── Enemy hit ──────────────────────────────────────────────────────────
+		# ── 5. Enemy hit ──────────────────────────────────────────────────────
 		if not state.enemies_hit.get(cur_hex, false):
 			var hit_enemy = _get_enemy_at(cur_hex)
-			if hit_enemy and hit_enemy in enemies:
+			var is_own : bool = hit_enemy == state.source_enemy and not (state.is_god_owned as bool)
+			if hit_enemy != null and hit_enemy in enemies and not is_own:
 				state.enemies_hit[cur_hex] = true
+				var e_px := _hex_to_pixel(cur_hex.x, cur_hex.y) + _grid_center_offset()
+				var e_d  : Vector2 = (proj.position as Vector2) - e_px
+				var en   : Vector2 = e_d.normalized() if e_d.length_squared() > 0.01 else Vector2.UP
 				if state.is_supercharged:
 					_proj_supercharge_explode(state.damage, proj.position)
-					state.done = true
-					proj.queue_free()
-					live_proj_states.erase(state)
-					if live_proj_states.is_empty() and phase == Phase.DODGE_PHASE:
-						_proj_transition()
+					_proj_die(state)
 					continue
-				_deal_damage_to_enemy(hit_enemy, state.damage, "")
+				_deal_damage_to_enemy(hit_enemy, int(state.damage), "")
 				if state.done: continue
 				if not is_instance_valid(proj): continue
-				var e_px : Vector2 = _hex_to_pixel(cur_hex.x, cur_hex.y) + _grid_center_offset()
-				var en   : Vector2 = proj.position - e_px
-				en = en.normalized() if en.length_squared() > 0.01 else Vector2.UP
-				state.direction = state.direction.bounce(en)
-				state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
-				if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
+				state.direction  = state.direction.bounce(en)
+				state.speed     -= state.negative_bounce
+				if state.speed < PROJ_MIN_SPEED:
 					_proj_finalize(state)
-					continue
+				continue
 
-		# ── Player contact window ──────────────────────────────────────────────
+		# ── 6. Player contact ─────────────────────────────────────────────────
 		for pi in range(players.size()):
 			if state.done: break
 			if state.reaction_done.get(pi, false): continue
 			if state.pass_through.get(pi, false):  continue
+			if pi == state.source_idx and not state.is_god_owned: continue
 
-			var dist : float = proj.position.distance_to(players[pi].position)
-			if dist < HEX_SIZE * PROJ_HIT_RADIUS:
-				if not state.contact_est.has(pi):
-					# Estimate moment of actual contact from current position and speed
-					state.contact_est[pi] = state.elapsed + dist / maxf(state.speed, 1.0)
+			var hex_ctr : Vector2 = players[pi].position
 
-				# Auto-miss when window has expired
-				if state.elapsed - state.contact_est[pi] > PROJ_REACT_OK:
+			# A) Already physically crossed: wait for SPACE or timing-window expiry
+			if state.player_crossed.get(pi, false):
+				if (state.elapsed as float) - (state.contact_est[pi] as float) > PROJ_REACT_OK:
+					state.reaction_done[pi] = true
+					_proj_apply_miss(state, pi)
+				continue
+
+			# B) Update approach estimate for SPACE timing (before first crossing)
+			var lookahead : float = PROJ_REACT_OK * (state.speed as float) + HEX_SIZE * 2.0
+			var ray_t : float = _hex_ray_t(hex_ctr, HEX_SIZE, proj.position,
+					state.direction as Vector2, lookahead)
+			if ray_t >= 0.0:
+				var dist : float = lookahead * ray_t
+				state.contact_est[pi] = state.elapsed + dist / maxf(state.speed as float, 1.0)
+
+			# C) Enemy projectile: physical crossing → immediate damage + bounce/die
+			if not state.uses_decay:
+				var en := _hex_crossing_normal(hex_ctr, HEX_SIZE, prev_pos, proj.position)
+				if en != Vector2.ZERO:
 					state.reaction_done[pi] = true
 					_proj_apply_miss(state, pi)
 					if state.done: break
-					# Bounce off the player (miss = collision)
-					if is_instance_valid(proj):
-						var pn : Vector2 = (proj.position - players[pi].position).normalized()
-						state.direction = state.direction.bounce(pn)
-						state.speed    -= CURRENT_PROJ_NEGATIVE_BOUNCE
-						if state.speed < CURRENT_PROJ_LAUNCH_SPEED * 0.03:
+					if not is_instance_valid(proj): break
+					state.direction  = (state.direction as Vector2).bounce(en)
+					state.speed     -= state.negative_bounce as float
+					proj.position    = prev_pos
+					if (state.speed as float) < PROJ_MIN_SPEED:
+						_proj_finalize(state)
+					break
+
+			# D) Player projectile: tile-based entry, radial normal (matches BounceTracer)
+			else:
+				if cur_hex == player_positions[pi]:
+					var p_d  : Vector2 = (proj.position as Vector2) - hex_ctr
+					var pn   : Vector2 = p_d.normalized() if p_d.length_squared() > 0.01 else Vector2.UP
+					state.player_crossed[pi] = true
+					state.contact_est[pi]    = state.elapsed
+					state.direction  = (state.direction as Vector2).bounce(pn)
+					state.speed     -= state.negative_bounce as float
+					if (state.speed as float) < PROJ_MIN_SPEED:
+						state.reaction_done[pi] = true
+						_proj_apply_miss(state, pi)
+						if not state.done:
 							_proj_finalize(state)
-							break
+					break
 
 
-# ─── SPACE press ──────────────────────────────────────────────────────────────
+# ─── SPACE press ─────────────────────────────────────────────────────────────
 func _handle_proj_space_press(mouse_pos: Vector2) -> void:
-	# Find the open reaction window with smallest absolute timing error
 	var best_state : Dictionary = {}
 	var best_char  : int        = -1
 	var best_err   : float      = INF
@@ -1125,10 +1296,11 @@ func _handle_proj_space_press(mouse_pos: Vector2) -> void:
 		for pi in state.contact_est.keys():
 			if state.reaction_done.get(pi, false): continue
 			if state.pass_through.get(pi, false):  continue
-			var error = state.elapsed - state.contact_est[pi]
+			if pi == state.source_idx and not state.is_god_owned: continue
+			var error : float = (state.elapsed as float) - (state.contact_est[pi] as float)
 			if absf(error) <= PROJ_REACT_OK + 0.05 and absf(error) < best_err:
-				best_err  = absf(error)
-				best_char = pi
+				best_err   = absf(error)
+				best_char  = pi
 				best_state = state
 
 	if best_char < 0: return
@@ -1140,33 +1312,29 @@ func _handle_proj_space_press(mouse_pos: Vector2) -> void:
 
 # ─── Reaction resolution ──────────────────────────────────────────────────────
 func _proj_resolve_reaction(state: Dictionary, char_idx: int,
-							 timing_error: float, mouse_pos: Vector2) -> void:
-	var abs_err  = absf(timing_error)
-	var is_own   = (state.source_idx == char_idx)
-	var is_sonny = (player_names[char_idx] == "Sonny")
-	var is_mike  = (player_names[char_idx] == "Mike")
-	var p_pos    = players[char_idx].position
+		timing_error: float, mouse_pos: Vector2) -> void:
+	var abs_err  : float = absf(timing_error)
+	var is_own   : bool  = (state.source_idx == char_idx and not (state.is_god_owned as bool))
+	var is_sonny : bool  = (player_names[char_idx] == "Sonny")
+	var is_mike  : bool  = (player_names[char_idx] == "Mike")
+	var p_pos    : Vector2 = players[char_idx].position
 
 	if abs_err <= PROJ_REACT_PERFECT:
-		# ── Perfect ───────────────────────────────────────────
-		if is_sonny and not state.is_supercharged:
+		# ── Perfect ──────────────────────────────────────────────────────────
+		if is_sonny:
 			_proj_sonny_redirect(state, char_idx, mouse_pos)
-		elif is_sonny and state.is_supercharged:
-			# Supercharged: Sonny cannot redirect
-			_proj_apply_miss(state, char_idx)
 		elif is_mike:
 			_spawn_float_text(p_pos + Vector2(0, -50), "PERFECT DODGE!", Color(0.3, 1.0, 0.5))
 			if is_own:
-				_proj_stop(state)   # perfect dodge of own proj removes it
+				_proj_stop(state)
 			else:
-				state.pass_through[char_idx] = true
-				_proj_mike_counter(state, char_idx)
+				_proj_mike_catch(state, char_idx)
 	elif abs_err <= PROJ_REACT_OK:
-		# ── OK / Normal dodge — pass through, no damage ───────
+		# ── OK / dodge — pass through, no damage ─────────────────────────────
 		state.pass_through[char_idx] = true
 		_spawn_float_text(p_pos + Vector2(0, -50), "DODGED!", Color(0.9, 0.9, 0.3))
 	else:
-		# ── Miss ─────────────────────────────────────────────
+		# ── Miss ──────────────────────────────────────────────────────────────
 		_proj_apply_miss(state, char_idx)
 
 
@@ -1176,12 +1344,11 @@ func _proj_sonny_redirect(state: Dictionary, char_idx: int, mouse_pos: Vector2) 
 	var to_mouse : Vector2 = mouse_pos - p_world
 	var new_dir  : Vector2 = to_mouse.normalized() if to_mouse.length() > 8.0 else Vector2.RIGHT
 
-	# Snap visual to Sonny's position; new physics direction takes effect next frame
 	if is_instance_valid(state.node):
 		state.node.position = p_world
 
-	# Speed boost: add CURRENT_PROJ_NEGATIVE_BOUNCE * 0.5, decay restarts from new speed
-	state.speed     += CURRENT_PROJ_NEGATIVE_BOUNCE * 0.5
+	# Speed bonus counteracts the negative_bounce cost of a normal collision
+	state.speed     += (state.negative_bounce as float) * 0.5
 	state.direction  = new_dir
 
 	state.redirect_count += 1
@@ -1194,56 +1361,54 @@ func _proj_sonny_redirect(state: Dictionary, char_idx: int, mouse_pos: Vector2) 
 
 	_spawn_float_text(p_world + Vector2(0, -50), "REDIRECT!", Color(0.3, 1.0, 0.5))
 
-	# Reset contact and hit tracking for the new trajectory
-	state.contact_est   = {}
-	state.reaction_done = {}
-	state.pass_through  = {}
-	state.enemies_hit   = {}
-	state.elapsed       = 0.0
-	# Sonny is immune to the projectile he just redirected
-	state.reaction_done[char_idx] = true
-	state.pass_through[char_idx]  = true
+	# God ownership: projectile now hits everyone including Sonny and Mike.
+	# All tracking is reset for the new trajectory — no player immunity.
+	state.is_god_owned   = true
+	state.contact_est    = {}
+	state.player_crossed = {}
+	state.reaction_done  = {}
+	state.pass_through   = {}
+	state.enemies_hit    = {}
+	state.elapsed        = 0.0
 
 
-# ─── Mike counter-attack ──────────────────────────────────────────────────────
-func _proj_mike_counter(state: Dictionary, char_idx: int) -> void:
-	var offset   = _grid_center_offset()
-	var p_world  = players[char_idx].position
-	var has_tgt  = false
-	var tgt_pos  : Vector2
+# ─── Mike catch ───────────────────────────────────────────────────────────────
+func _proj_mike_catch(state: Dictionary, char_idx: int) -> void:
+	var p_pos : Vector2 = players[char_idx].position
+	if mike_caught_projectiles.size() >= 2:
+		_spawn_float_text(p_pos + Vector2(0, -70), "Bag is full!", Color(1.0, 0.3, 0.3))
+	else:
+		mike_caught_projectiles.append({ "damage": state.damage as float })
+		_spawn_float_text(p_pos + Vector2(0, -70), "Caught it!", Color(0.3, 1.0, 0.5))
+	_proj_die(state)
+	_refresh_ui()
 
-	if state.source_idx >= 0 and state.source_idx < players.size():
-		tgt_pos = players[state.source_idx].position
-		has_tgt = true
-	elif state.source_enemy != null and state.source_enemy in enemies:
-		tgt_pos = _hex_to_pixel(state.source_enemy.grid_col,
-								state.source_enemy.grid_row) + offset
-		has_tgt = true
-
-	if not has_tgt:
-		_spawn_float_text(p_world + Vector2(0, -70), "COUNTER! (no target)", Color(0.3, 0.8, 1.0))
-		return
-
-	_spawn_float_text(p_world + Vector2(0, -70), "COUNTER!", Color(0.3, 0.8, 1.0))
-	var dir = (tgt_pos - p_world).normalized()
-	# Counter is a new projectile owned by Mike
-	_launch_projectile(char_idx, null, state.damage, p_world, dir, 1, 0, false)
+# ─── Fire Mike's stored projectiles after a successful Draw Shot ───────────────
+func _fire_mike_stored_projectiles(source_idx: int) -> void:
+	if mike_caught_projectiles.is_empty(): return
+	var delay := 0.3
+	for caught in mike_caught_projectiles:
+		var t   := create_tween()
+		var dmg : float = caught["damage"]
+		t.tween_interval(delay)
+		t.tween_callback(func():
+			if players.is_empty(): return
+			_launch_projectile(source_idx, null, dmg,
+				players[source_idx].position, mike_shot_dir)
+		)
+		delay += 0.3
+	mike_caught_projectiles.clear()
+	_refresh_ui()
 
 
 # ─── Miss / damage ────────────────────────────────────────────────────────────
 func _proj_apply_miss(state: Dictionary, char_idx: int) -> void:
 	if state.is_supercharged:
-		var impact = players[char_idx].position
-		state.done = true
-		if is_instance_valid(state.node):
-			state.node.queue_free()
-		_proj_supercharge_explode(state.damage, impact)
-		live_proj_states.erase(state)
-		if live_proj_states.is_empty() and phase == Phase.DODGE_PHASE:
-			_proj_transition()
+		_proj_supercharge_explode(state.damage, players[char_idx].position)
+		_proj_die(state)
 		return
 
-	var real_dmg = players[char_idx].take_damage(state.damage)
+	var real_dmg : float = players[char_idx].take_damage(state.damage)
 	_spawn_damage_float(players[char_idx].position, real_dmg)
 	_spawn_float_text(players[char_idx].position + Vector2(0, -50),
 		"HIT! -" + str(real_dmg) + " HP", Color(1.0, 0.3, 0.3))
@@ -1251,54 +1416,54 @@ func _proj_apply_miss(state: Dictionary, char_idx: int) -> void:
 		_on_player_died()
 
 
-# ─── Stop projectile early (Mike perfect dodge of own proj) ──────────────────
+# ─── Stop projectile (Mike perfect dodge of own projectile) ──────────────────
 func _proj_stop(state: Dictionary) -> void:
+	_proj_die(state)
+
+
+# ─── Projectile dies with no explosion ───────────────────────────────────────
+func _proj_die(state: Dictionary) -> void:
 	if state.done: return
 	state.done = true
-	if is_instance_valid(state.node):
-		state.node.queue_free()
+	if is_instance_valid(state.node): state.node.queue_free()
 	live_proj_states.erase(state)
 	if live_proj_states.is_empty() and phase == Phase.DODGE_PHASE:
 		_proj_transition()
 
 
-# ─── Speed-death finalization ─────────────────────────────────────────────────
+# ─── Speed-death finalization (may trigger supercharge explosion) ─────────────
 func _proj_finalize(state: Dictionary) -> void:
 	if state.done: return
 	state.done = true
-
 	var last_pos : Vector2 = state.node.position if is_instance_valid(state.node) else Vector2.ZERO
-	if is_instance_valid(state.node):
-		state.node.queue_free()
-
+	if is_instance_valid(state.node): state.node.queue_free()
 	if state.is_supercharged:
 		_proj_supercharge_explode(state.damage, last_pos)
-
 	live_proj_states.erase(state)
 	if live_proj_states.is_empty() and phase == Phase.DODGE_PHASE:
 		_proj_transition()
 
 
 # ─── Supercharged explosion ───────────────────────────────────────────────────
-func _proj_supercharge_explode(damage: int, impact_world: Vector2) -> void:
-	var impact_hex = _pixel_to_hex(impact_world)
-	var affected   = [impact_hex] + _get_neighbors(impact_hex.x, impact_hex.y)
+func _proj_supercharge_explode(damage: float, impact_world: Vector2) -> void:
+	var impact_hex := _pixel_to_hex(impact_world)
+	var affected   := [impact_hex] + _get_neighbors(impact_hex.x, impact_hex.y)
 	_spawn_float_text(impact_world + Vector2(0, -30), "SUPERCHARGED!", Color(1.0, 0.4, 0.1))
 	for hex in affected:
-		var dmg = damage + (1 if hex == impact_hex else 0)
-		var enemy = _get_enemy_at(hex)
+		var dmg := damage + (1.0 if hex == impact_hex else 0.0)
+		var enemy := _get_enemy_at(hex)
 		if enemy:
-			_deal_damage_to_enemy(enemy, dmg, "")
+			_deal_damage_to_enemy(enemy, int(dmg), "")
 		for pi in range(players.size()):
 			if player_positions[pi] == hex:
-				var real = players[pi].take_damage(dmg)
+				var real : float = players[pi].take_damage(dmg)
 				_spawn_damage_float(players[pi].position, real)
 				if players[pi].hp <= 0:
 					_on_player_died()
 					return
 
 
-# ─── Phase transition after all projectiles done ──────────────────────────────
+# ─── Phase transition after all projectiles done ─────────────────────────────
 func _proj_transition() -> void:
 	if enemies.is_empty():
 		_on_floor_cleared()
@@ -1392,7 +1557,8 @@ func _on_floor_cleared() -> void:
 	if floor_cleared: return
 	floor_cleared  = true
 	sonny_w_used   = false
-	mike_w_uses    = 2
+	mike_w_uses    = 1
+	mike_caught_projectiles.clear()
 	if sonny_bomb_enemy != null and sonny_bomb_enemy in enemies:
 		enemies.erase(sonny_bomb_enemy)
 		sonny_bomb_enemy.queue_free()
@@ -1466,6 +1632,55 @@ func _build_ui() -> void:
 	reset_label.text     = "[K] Reset turn (1 use)"
 	add_child(reset_label)
 
+	_build_end_turn_confirm()
+
+func _build_end_turn_confirm() -> void:
+	var vp = get_viewport_rect().size
+	var w = 460.0; var h = 170.0
+	end_turn_confirm_panel = Panel.new()
+	end_turn_confirm_panel.position = Vector2(vp.x / 2.0 - w / 2.0, vp.y / 2.0 - h / 2.0)
+	end_turn_confirm_panel.size = Vector2(w, h)
+	end_turn_confirm_panel.visible = false
+	end_turn_confirm_panel.z_as_relative = false
+	end_turn_confirm_panel.z_index = 200
+	add_child(end_turn_confirm_panel)
+
+	var msg = Label.new()
+	msg.name = "MsgLabel"
+	msg.position = Vector2(20, 18)
+	msg.size = Vector2(420, 72)
+	msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	end_turn_confirm_panel.add_child(msg)
+
+	var yes_btn = Button.new()
+	yes_btn.text = "Yes — End Turn  [Y]"
+	yes_btn.position = Vector2(20, 110)
+	yes_btn.size = Vector2(195, 42)
+	yes_btn.pressed.connect(_on_end_turn_confirm_yes)
+	end_turn_confirm_panel.add_child(yes_btn)
+
+	var no_btn = Button.new()
+	no_btn.text = "No — Keep Playing  [N]"
+	no_btn.position = Vector2(240, 110)
+	no_btn.size = Vector2(200, 42)
+	no_btn.pressed.connect(_on_end_turn_confirm_no)
+	end_turn_confirm_panel.add_child(no_btn)
+
+func _show_end_turn_confirm() -> void:
+	var cur = players[current_player_index]
+	var act = cur.actions_left
+	var msg = end_turn_confirm_panel.get_node("MsgLabel") as Label
+	msg.text = player_names[current_player_index] + " still has " \
+		+ str(act) + " action" + ("s" if act != 1 else "") + " left.\nEnd turn anyway?"
+	end_turn_confirm_panel.visible = true
+
+func _on_end_turn_confirm_yes() -> void:
+	end_turn_confirm_panel.visible = false
+	_end_player_turn()
+
+func _on_end_turn_confirm_no() -> void:
+	end_turn_confirm_panel.visible = false
+
 func _refresh_ui() -> void:
 	if not hp_label: return
 
@@ -1474,9 +1689,11 @@ func _refresh_ui() -> void:
 
 	var sonny = players[0]
 	var mike  = players[1]
-	var sh = "♥".repeat(sonny.hp) + "♡".repeat(maxi(0, sonny.max_hp - sonny.hp))
-	var mh = "♥".repeat(mike.hp)  + "♡".repeat(maxi(0, mike.max_hp  - mike.hp))
-	hp_label.text = "Sonny: " + sh + "   Mike: " + mh
+	var sh  = "♥".repeat(sonny.hp) + "♡".repeat(maxi(0, sonny.max_hp - sonny.hp))
+	var mh  = "♥".repeat(mike.hp)  + "♡".repeat(maxi(0, mike.max_hp  - mike.hp))
+	var bag = " [balls: " + str(mike_caught_projectiles.size()) + "]" \
+			  if not mike_caught_projectiles.is_empty() else ""
+	hp_label.text = "Sonny: " + sh + "   Mike: " + mh + bag
 
 	var cur = players[current_player_index]
 	if cur.floor_cleared:
@@ -1547,6 +1764,13 @@ func _input(event: InputEvent) -> void:
 	if phase == Phase.DEAD:
 		if event is InputEventKey and event.keycode == KEY_ENTER and event.pressed:
 			_restart()
+		return
+
+	if end_turn_confirm_panel and end_turn_confirm_panel.visible:
+		if event is InputEventKey and event.pressed:
+			match event.keycode:
+				KEY_Y: _on_end_turn_confirm_yes()
+				KEY_N, KEY_ESCAPE: _on_end_turn_confirm_no()
 		return
 
 	# Sonny's charge bar — intercept mouse release while holding
@@ -1622,7 +1846,11 @@ func _handle_player_input(event: InputEvent) -> void:
 					attack_tiles = []
 					_refresh_tile_colors()
 			KEY_D:
-				_end_player_turn()
+				var cur_d = players[current_player_index]
+				if cur_d.actions_left > 0 and not cur_d.floor_cleared:
+					_show_end_turn_confirm()
+				else:
+					_end_player_turn()
 			KEY_U:
 				_undo_move()
 			KEY_K:
@@ -1727,7 +1955,7 @@ func _on_attack_bar_resolved(result: String) -> void:
 
 	match result:
 		"perfect":
-			_execute_attack(pending_attack_mode, "crit")
+			_execute_attack(pending_attack_mode, "hit")
 		"dodged":
 			_execute_attack(pending_attack_mode, "hit")
 		"hit":
@@ -1763,8 +1991,7 @@ func _on_dodge_resolved(result: String) -> void:
 
 	match result:
 		"perfect":
-			target_player.perfection = mini(target_player.perfection + 1, target_player.perfection_cap)
-			_spawn_float_text(px_pos + Vector2(0, -50), "PERFECT! +Cockiness", Color(0.3, 1.0, 0.5))
+			_spawn_float_text(px_pos + Vector2(0, -50), "PERFECT!", Color(0.3, 1.0, 0.5))
 		"dodged":
 			_spawn_float_text(px_pos + Vector2(0, -50), "DODGED!", Color(0.9, 0.9, 0.3))
 		"hit":
@@ -1843,8 +2070,7 @@ func _undo_move() -> void:
 		players[i].grid_row = g["row"]
 		player_positions[i] = turn_snapshot["player_positions"][i]
 		players[i].position = _hex_to_pixel(g["col"], g["row"]) + offset
-		players[i].actions_left = players[i].actions_per_turn
-		players[i].has_attacked = false
+		players[i].reset_turn()
 	players_turned_this_round = []
 	current_player_index = 0
 	_start_player_turn()
@@ -1861,7 +2087,7 @@ func _reset_turn() -> void:
 		players[i].grid_row = g["row"]
 		player_positions[i] = turn_snapshot["player_positions"][i]
 		players[i].position = _hex_to_pixel(g["col"], g["row"]) + offset
-		players[i].actions_left = players[i].actions_per_turn
+		players[i].reset_turn()
 		players[i].perfection = turn_snapshot["player_perfection"][i]
 	mike_w_uses = turn_snapshot["mike_w_uses"]
 	sonny_w_used = turn_snapshot["sonny_w_used"]
@@ -1884,7 +2110,6 @@ func _reset_turn() -> void:
 
 func _start_player_turn() -> void:
 	phase = Phase.PLAYER_TURN
-	players[current_player_index].reset_turn()
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_ui()
@@ -1957,6 +2182,8 @@ func _process(delta: float) -> void:
 func _process_enemy_turn(delta: float) -> void:
 	if action_queue.is_empty():
 		players_turned_this_round = []
+		for p in players:
+			p.reset_turn()
 		if not players[0].floor_cleared:
 			_decrement_timer()
 		_save_turn_snapshot()

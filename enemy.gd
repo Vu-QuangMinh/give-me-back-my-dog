@@ -29,7 +29,7 @@ const ENEMY_PRESETS : Dictionary = {
 	"grunt": {
 		"enemy_type":       "grunt",
 		"display_label":    "G",
-		"max_hp":           5,
+		"max_hp":           3,
 		"actions_per_turn": 2,
 		"move_range":       2,
 		"body_color":       Color(0.70, 0.20, 0.20),
@@ -49,24 +49,26 @@ const ENEMY_PRESETS : Dictionary = {
 	"archer": {
 		"enemy_type":       "archer",
 		"display_label":    "A",
-		"max_hp":           3,
-		"actions_per_turn": 2,
+		"max_hp":           2,
+		"actions_per_turn": 1,
 		"move_range":       1,
-		"body_color":       Color(0.22, 0.45, 0.85),
+		"body_color":       Color(0.58, 0.15, 0.82),
 		"behavior":         Behavior.RANGER,
 		"immovable":        false,
 		"range_min":        2,
-		"range_max":        4,
+		"range_max":        5,
 		"attacks": [
-			{ "range": 4, "damage": 2, "aoe": 1, "hits": 1, "speed": "medium",
+			# A1 — single shot, medium speed, no bounce
+			{ "range": 4, "damage": 1, "aoe": 1, "hits": 1, "speed": "medium",
 			  "perfect_window": 0.0, "ok_window": 0.0,
-			  "dual_bar": false, "speed_mults": [] },
-			{ "range": 4, "damage": 0, "aoe": 1, "hits": 2, "speed": "medium",
+			  "dual_bar": false, "speed_mults": [], "no_bounce": true },
+			# A2 — two fast shots; second fires 0.3 s after the first
+			{ "range": 4, "damage": 0, "aoe": 1, "hits": 2, "speed": "fast",
 			  "perfect_window": 0.0, "ok_window": 0.0,
-			  "dual_bar": false, "speed_mults": [],
+			  "dual_bar": false, "speed_mults": [], "no_bounce": true,
 			  "hit_details": [
-			  	{ "damage": 0.5, "speed": "medium" },
-			  	{ "damage": 0.5, "speed": "fast" },
+			  	{ "damage": 0.5, "speed": "fast", "delay": 0.0 },
+			  	{ "damage": 0.5, "speed": "fast", "delay": 0.3 },
 			  ] },
 		],
 	},
@@ -153,17 +155,11 @@ var has_attacked_this_turn : bool  = false
 #  VISUALS
 # ═══════════════════════════════════════════════════════════════════
 
-const BAR_WIDTH  = 36.0
-const BAR_HEIGHT = 5.0
-
-var hp_bar_bg   : Line2D = null
-var hp_bar_fill : Line2D = null
-var name_label  : Label  = null
+var name_label : Label = null
 
 func _ready() -> void:
 	hp         = max_hp
 	dodge_line = randf_range(0.60, 1.00)
-	_build_hp_bar()
 	_build_label()
 	queue_redraw()
 
@@ -174,6 +170,61 @@ func setup(col: int, row: int) -> void:
 func _draw() -> void:
 	draw_circle(Vector2.ZERO, 14, body_color)
 	draw_circle(Vector2.ZERO, 14, body_color.darkened(0.3), false, 2.0)
+	_draw_hp_bar()
+
+func _draw_hp_bar() -> void:
+	const CELL_W   := 8.0
+	const CELL_H   := 7.0
+	const CELL_GAP := 2.0
+	const PAD      := 2.0
+	const R        := 3.0
+	const BY       := -32.0
+
+	var bar_w := max_hp * (CELL_W + CELL_GAP) - CELL_GAP + PAD * 2.0
+	var bar_h := CELL_H + PAD * 2.0
+	var bx    := -bar_w * 0.5
+
+	# Outer background
+	_draw_rrect_filled(Rect2(bx, BY, bar_w, bar_h), R, Color(0.08, 0.08, 0.08))
+
+	# HP cells — filled red, empty dark
+	for i in range(max_hp):
+		var cx    := bx + PAD + i * (CELL_W + CELL_GAP)
+		var color := Color(0.85, 0.10, 0.10) if i < hp else Color(0.18, 0.05, 0.05)
+		draw_rect(Rect2(cx, BY + PAD, CELL_W, CELL_H), color)
+
+	# Dividers between cells
+	for i in range(1, max_hp):
+		var dx := bx + PAD + i * (CELL_W + CELL_GAP) - CELL_GAP * 0.5
+		draw_line(Vector2(dx, BY + 1.0), Vector2(dx, BY + bar_h - 1.0),
+				  Color(0.05, 0.05, 0.05), 2.0)
+
+	# Border
+	_draw_rrect_outline(Rect2(bx, BY, bar_w, bar_h), R, Color(0.50, 0.50, 0.55), 1.5)
+
+func _draw_rrect_filled(rect: Rect2, r: float, color: Color) -> void:
+	draw_rect(Rect2(rect.position + Vector2(r, 0.0),
+					rect.size    - Vector2(r * 2.0, 0.0)), color)
+	draw_rect(Rect2(rect.position + Vector2(0.0, r),
+					Vector2(r, rect.size.y - r * 2.0)), color)
+	draw_rect(Rect2(rect.position + Vector2(rect.size.x - r, r),
+					Vector2(r, rect.size.y - r * 2.0)), color)
+	draw_circle(rect.position + Vector2(r,                r),                r, color)
+	draw_circle(rect.position + Vector2(rect.size.x - r,  r),                r, color)
+	draw_circle(rect.position + Vector2(r,                rect.size.y - r),  r, color)
+	draw_circle(rect.position + Vector2(rect.size.x - r,  rect.size.y - r), r, color)
+
+func _draw_rrect_outline(rect: Rect2, r: float, color: Color, width: float) -> void:
+	var x1 := rect.position.x;         var y1 := rect.position.y
+	var x2 := rect.position.x + rect.size.x; var y2 := rect.position.y + rect.size.y
+	draw_line(Vector2(x1 + r, y1), Vector2(x2 - r, y1), color, width)
+	draw_line(Vector2(x1 + r, y2), Vector2(x2 - r, y2), color, width)
+	draw_line(Vector2(x1, y1 + r), Vector2(x1, y2 - r), color, width)
+	draw_line(Vector2(x2, y1 + r), Vector2(x2, y2 - r), color, width)
+	draw_arc(Vector2(x1 + r, y1 + r), r, PI,           PI * 1.5, 8, color, width)
+	draw_arc(Vector2(x2 - r, y1 + r), r, PI * 1.5,     TAU,      8, color, width)
+	draw_arc(Vector2(x2 - r, y2 - r), r, 0.0,          PI * 0.5, 8, color, width)
+	draw_arc(Vector2(x1 + r, y2 - r), r, PI * 0.5,     PI,       8, color, width)
 
 func _build_label() -> void:
 	name_label          = Label.new()
@@ -181,33 +232,8 @@ func _build_label() -> void:
 	name_label.position = Vector2(-5, -14)
 	add_child(name_label)
 
-func _build_hp_bar() -> void:
-	hp_bar_bg               = Line2D.new()
-	hp_bar_bg.width         = BAR_HEIGHT
-	hp_bar_bg.default_color = body_color.darkened(0.6)
-	hp_bar_bg.points        = PackedVector2Array([
-		Vector2(-BAR_WIDTH / 2, -28),
-		Vector2( BAR_WIDTH / 2, -28)
-	])
-	add_child(hp_bar_bg)
-
-	hp_bar_fill               = Line2D.new()
-	hp_bar_fill.width         = BAR_HEIGHT
-	hp_bar_fill.default_color = body_color.lightened(0.2)
-	hp_bar_fill.points        = PackedVector2Array([
-		Vector2(-BAR_WIDTH / 2, -28),
-		Vector2( BAR_WIDTH / 2, -28)
-	])
-	add_child(hp_bar_fill)
-
 func refresh_hp_bar() -> void:
-	if not hp_bar_fill: return
-	var frac  = float(hp) / float(max_hp)
-	var right = -BAR_WIDTH / 2 + BAR_WIDTH * frac
-	hp_bar_fill.points = PackedVector2Array([
-		Vector2(-BAR_WIDTH / 2, -28),
-		Vector2(right,          -28)
-	])
+	queue_redraw()
 
 # ═══════════════════════════════════════════════════════════════════
 #  ATTACK CYCLING

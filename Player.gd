@@ -13,8 +13,8 @@ const CHARACTER_PRESETS : Dictionary = {
 	"Sonny": {
 		"max_hp":           4,       # starting / max HP
 		"equipped":         "pan",   # weapon key (see WEAPONS below)
-		"spawn_col":        5,       # grid column at combat start
-		"spawn_row":        1,       # grid row at combat start
+		"spawn_col":        0,       # grid column at combat start
+		"spawn_row":        4,       # grid row at combat start
 		"move_range":       2,       # BFS tiles per move action
 		"actions_per_turn": 2,       # actions available each turn
 		"uses_draw_shot":   false,   # set true to use Mike's aim/drag flow
@@ -22,8 +22,8 @@ const CHARACTER_PRESETS : Dictionary = {
 	"Mike": {
 		"max_hp":           3,
 		"equipped":         "slingshot",
-		"spawn_col":        6,
-		"spawn_row":        1,
+		"spawn_col":        0,
+		"spawn_row":        2,
 		"move_range":       2,
 		"actions_per_turn": 2,
 		"uses_draw_shot":   true,
@@ -69,7 +69,7 @@ const WEAPONS : Dictionary = {
 	"slingshot": {
 		"q_name":       "Draw Shot",
 		"q_desc":       "aim+drag timing, 1 dmg, 1 bounce",
-		"w_name":       "Grapple",         "w_desc":   "pull enemy to you or be pulled (2/floor)",
+		"w_name":       "Grapple",         "w_desc":   "hook phases walls/columns, pull first char (1/floor)",
 		"q_dmg":        1,                 "w_dmg":    1,
 		"q_mode":       "draw_shot",       "w_mode":   "grapple",
 		"q_effect":     "",                "w_effect": "",
