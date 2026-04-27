@@ -553,6 +553,9 @@ func _player_attack_enemy(enemy: Node) -> void:
 	current_player.use_action()
 	current_player.has_attacked = true
 	attack_committed_this_round = true
+	# Damage popup phía trên enemy capsule (cao ~1.6m so với chân)
+	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
+		"-%d" % dmg, Color(1.0, 0.55, 0.30))
 	if enemy.hp <= 0:
 		_kill_enemy(enemy)
 	else:
@@ -568,12 +571,55 @@ func _kill_enemy(enemy: Node) -> void:
 	if hud != null:
 		hud.remove_enemy(enemy.get_instance_id())
 	enemies.erase(enemy)
-	enemy.queue_free()
+	_play_death_animation(enemy, true)   # true → queue_free khi xong
 
 # Khi hết enemies → floor clear. Mốc 9 sẽ wire vào world_map transition.
 func _check_floor_clear() -> void:
 	if enemies.is_empty():
 		print("[FLOOR CLEAR] All enemies defeated. (TODO Mốc 9: world map transition)")
+
+# ─── Polish helpers (Mốc 6.5) ───────────────────────────────
+
+# Floating damage text — Label3D billboard, float lên + fade ra trong 0.9s.
+func _spawn_damage_popup(world_pos: Vector3, text: String, color: Color) -> void:
+	var label := Label3D.new()
+	label.text             = text
+	label.font_size        = 96
+	label.pixel_size       = 0.006
+	label.outline_size     = 12
+	label.outline_modulate = Color(0, 0, 0, 0.95)
+	label.modulate         = color
+	label.no_depth_test    = true
+	label.billboard        = BaseMaterial3D.BILLBOARD_ENABLED
+	label.position         = world_pos
+	add_child(label)
+	var tween := create_tween().set_parallel(true)
+	tween.tween_property(label, "position:y", world_pos.y + 1.4, 0.95) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(label, "modulate:a", 0.0, 0.95) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# chain() để callback chạy SAU khi tween kết thúc, không song song
+	tween.chain().tween_callback(label.queue_free)
+
+# Animation chết: scale xuống + sink + fade. queue_free nếu free_after=true
+# (enemies). Player giữ node lại (chỉ ẩn) — free_after=false.
+func _play_death_animation(entity: Node, free_after: bool) -> void:
+	var orig_y : float = entity.position.y
+	var tween := create_tween().set_parallel(true)
+	tween.tween_property(entity, "scale", Vector3(0.15, 0.15, 0.15), 0.45) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(entity, "position:y", orig_y - 0.6, 0.45) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Fade material alpha — cần TRANSPARENCY_ALPHA mode
+	var model = entity.get_node_or_null("ModelPlaceholder")
+	if model and model is MeshInstance3D and model.material_override is StandardMaterial3D:
+		var mat : StandardMaterial3D = model.material_override
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		tween.tween_property(mat, "albedo_color:a", 0.0, 0.45)
+	if free_after:
+		tween.chain().tween_callback(entity.queue_free)
+	else:
+		tween.chain().tween_callback(func(): entity.visible = false)
 
 # ═══════════════════════════════════════════════════════════
 #  ENEMY TURN (Mốc 6.2)
@@ -687,15 +733,32 @@ func _enemy_perform_attack(enemy: Node, target_idx: int) -> void:
 	var attack : Dictionary = enemy.get_current_attack()
 	if attack.is_empty(): return
 	var atk_range : int = int(attack.get("range", 1))
-	var p = players[target_idx]
 	if atk_range == 1:
-		# Melee → DodgeBar (Mốc 6.3)
+		# Telegraph (flash ô target đỏ) rồi DodgeBar.
+		await _telegraph_attack(target_idx)
 		await _trigger_dodge_bar(enemy, target_idx, attack)
 	else:
-		# Ranged → projectile sẽ làm ở Mốc 8. Tạm: damage thẳng trừ 50%.
+		# Ranged → projectile sẽ làm ở Mốc 8. Tạm: damage thẳng.
+		await _telegraph_attack(target_idx)
 		var dmg : int = int(attack.get("damage", 1))
 		_apply_damage_to_player(target_idx, dmg, "hit")
 	enemy.advance_attack()
+
+# Flash ô target 3 nhịp đỏ ↔ thường (~0.4s) để player thấy ai sắp bị đánh.
+func _telegraph_attack(target_idx: int) -> void:
+	if target_idx < 0 or target_idx >= player_positions.size(): return
+	var pos : Vector2i = player_positions[target_idx]
+	var tile = tiles.get(pos)
+	if tile == null: return
+	for i in 3:
+		tile.set_state("attack")
+		await get_tree().create_timer(0.07).timeout
+		tile.set_state("selected")
+		await get_tree().create_timer(0.07).timeout
+	tile.set_state("attack")
+	await get_tree().create_timer(0.10).timeout
+	# Restore tile state về đúng — không cần manual, tile bị "selected" hoặc
+	# "attack" sẽ được override khi _refresh_tile_colors chạy lần sau.
 
 func _trigger_dodge_bar(enemy: Node, target_idx: int, attack: Dictionary) -> void:
 	phase = Phase.DODGE_PHASE
@@ -718,14 +781,19 @@ func _trigger_dodge_bar(enemy: Node, target_idx: int, attack: Dictionary) -> voi
 func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") -> void:
 	if target_idx < 0 or target_idx >= players.size(): return
 	var p = players[target_idx]
+	var head_pos : Vector3 = p.position + Vector3(0, 1.9, 0)
 	match result:
-		"perfect", "dodged":
+		"perfect":
 			p.perfection = mini(p.perfection + 1, p.perfection_cap)
-			# Không trừ HP
+			_spawn_damage_popup(head_pos, "PERFECT!", Color(0.31, 1.00, 0.51))
+		"dodged":
+			p.perfection = mini(p.perfection + 1, p.perfection_cap)
+			_spawn_damage_popup(head_pos, "DODGE!", Color(0.95, 0.90, 0.30))
 		_:  # "hit" hoặc bất cứ gì khác
 			p.take_damage(dmg)
+			_spawn_damage_popup(head_pos, "-%d HP" % dmg, Color(1.0, 0.30, 0.30))
 			if p.hp <= 0:
-				p.visible = false   # ẩn capsule khi chết (Mốc 6.4 polish)
+				_play_death_animation(p, false)   # ẩn capsule có animation
 	# HUD update
 	if hud != null:
 		hud.set_hp(player_names[target_idx], p.hp, p.max_hp)
