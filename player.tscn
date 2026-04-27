@@ -1,10 +1,19 @@
-[gd_scene format=3 uid="uid://p4mvue614xoy"]
+[gd_scene format=3 uid="uid://cogp7bwbclx3l"]
 
 [ext_resource type="Texture2D" uid="uid://dcipkvgns7abd" path="res://spritesheet.png" id="1_onrkg"]
 [ext_resource type="Script" uid="uid://bybqrssn6jxry" path="res://Player.gd" id="2_i3pqv"]
+[ext_resource type="Texture2D" uid="uid://cguan6160ag12" path="res://CharacterAsset/Sonny/SonnyAvatar.png" id="3_i3pqv"]
 
 [node name="Player" type="Sprite2D" unique_id=2081208509]
 texture = ExtResource("1_onrkg")
 region_enabled = true
 region_rect = Rect2(0, 1, 48, 48)
 script = ExtResource("2_i3pqv")
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1126583449]
+position = Vector2(-20, -7)
+scale = Vector2(0.06, 0.06)
+texture = ExtResource("3_i3pqv")
+
+[node name="@Sprite2D@2" type="Sprite2D" parent="." unique_id=1444967289]
+scale = Vector2(1e-05, 1e-05)

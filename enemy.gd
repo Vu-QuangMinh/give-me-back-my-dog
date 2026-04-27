@@ -1,4 +1,4 @@
-extends Node2D
+extends Node3D
 class_name Enemy
 
 # ═══════════════════════════════════════════════════════════════════
@@ -58,11 +58,9 @@ const ENEMY_PRESETS : Dictionary = {
 		"range_min":        2,
 		"range_max":        5,
 		"attacks": [
-			# A1 — single shot, medium speed, no bounce
 			{ "range": 4, "damage": 1, "aoe": 1, "hits": 1, "speed": "medium",
 			  "perfect_window": 0.0, "ok_window": 0.0,
 			  "dual_bar": false, "speed_mults": [], "no_bounce": true },
-			# A2 — two fast shots; second fires 0.3 s after the first
 			{ "range": 4, "damage": 0, "aoe": 1, "hits": 2, "speed": "fast",
 			  "perfect_window": 0.0, "ok_window": 0.0,
 			  "dual_bar": false, "speed_mults": [], "no_bounce": true,
@@ -119,7 +117,6 @@ const ENEMY_PRESETS : Dictionary = {
 
 # ═══════════════════════════════════════════════════════════════════
 #  EXPORTED PARAMETERS
-#  ► Set via script before add_child(), or tweak in the Godot Inspector.
 # ═══════════════════════════════════════════════════════════════════
 
 @export var enemy_type       : String   = "grunt"
@@ -131,109 +128,50 @@ const ENEMY_PRESETS : Dictionary = {
 @export var behavior         : Behavior = Behavior.AGGRESSIVE
 @export var immovable        : bool     = false
 
-# Ranger-specific: maintained distance band from nearest player
 @export var range_min : int = 2
 @export var range_max : int = 5
 
-# Attack list — assigned from ENEMY_PRESETS, not set via Inspector
 var attacks : Array = []
 
 # ═══════════════════════════════════════════════════════════════════
 #  RUNTIME STATE
 # ═══════════════════════════════════════════════════════════════════
 
-var hp                    : int   = 0
-var grid_col              : int   = 0
-var grid_row              : int   = 0
-var dodge_line            : float = 0.0
-var bleed_stacks          : int   = 0
-var disarmed_turns        : int   = 0
-var attack_index          : int   = 0   # cycles through attacks[] each action
+var hp                     : int   = 0
+var grid_col               : int   = 0
+var grid_row               : int   = 0
+var dodge_line             : float = 0.0
+var bleed_stacks           : int   = 0
+var disarmed_turns         : int   = 0
+var attack_index           : int   = 0
 var has_attacked_this_turn : bool  = false
 
 # ═══════════════════════════════════════════════════════════════════
-#  VISUALS
+#  3D NODES (từ scene)
 # ═══════════════════════════════════════════════════════════════════
 
-var name_label : Label = null
+var name_label : Label3D        = null
+var model_node : MeshInstance3D = null
 
 func _ready() -> void:
 	hp         = max_hp
 	dodge_line = randf_range(0.60, 1.00)
-	_build_label()
-	queue_redraw()
+	name_label = get_node_or_null("NameLabel")
+	model_node = get_node_or_null("ModelPlaceholder")
+	if name_label:
+		name_label.text = display_label
+	# Tô placeholder body bằng màu của preset (không ảnh hưởng khi đã thay model thật)
+	if model_node and model_node.material_override is StandardMaterial3D:
+		var mat : StandardMaterial3D = model_node.material_override
+		mat.albedo_color = body_color
 
 func setup(col: int, row: int) -> void:
 	grid_col = col
 	grid_row = row
 
-func _draw() -> void:
-	draw_circle(Vector2.ZERO, 14, body_color)
-	draw_circle(Vector2.ZERO, 14, body_color.darkened(0.3), false, 2.0)
-	_draw_hp_bar()
-
-func _draw_hp_bar() -> void:
-	const CELL_W   := 8.0
-	const CELL_H   := 7.0
-	const CELL_GAP := 2.0
-	const PAD      := 2.0
-	const R        := 3.0
-	const BY       := -32.0
-
-	var bar_w := max_hp * (CELL_W + CELL_GAP) - CELL_GAP + PAD * 2.0
-	var bar_h := CELL_H + PAD * 2.0
-	var bx    := -bar_w * 0.5
-
-	# Outer background
-	_draw_rrect_filled(Rect2(bx, BY, bar_w, bar_h), R, Color(0.08, 0.08, 0.08))
-
-	# HP cells — filled red, empty dark
-	for i in range(max_hp):
-		var cx    := bx + PAD + i * (CELL_W + CELL_GAP)
-		var color := Color(0.85, 0.10, 0.10) if i < hp else Color(0.18, 0.05, 0.05)
-		draw_rect(Rect2(cx, BY + PAD, CELL_W, CELL_H), color)
-
-	# Dividers between cells
-	for i in range(1, max_hp):
-		var dx := bx + PAD + i * (CELL_W + CELL_GAP) - CELL_GAP * 0.5
-		draw_line(Vector2(dx, BY + 1.0), Vector2(dx, BY + bar_h - 1.0),
-				  Color(0.05, 0.05, 0.05), 2.0)
-
-	# Border
-	_draw_rrect_outline(Rect2(bx, BY, bar_w, bar_h), R, Color(0.50, 0.50, 0.55), 1.5)
-
-func _draw_rrect_filled(rect: Rect2, r: float, color: Color) -> void:
-	draw_rect(Rect2(rect.position + Vector2(r, 0.0),
-					rect.size    - Vector2(r * 2.0, 0.0)), color)
-	draw_rect(Rect2(rect.position + Vector2(0.0, r),
-					Vector2(r, rect.size.y - r * 2.0)), color)
-	draw_rect(Rect2(rect.position + Vector2(rect.size.x - r, r),
-					Vector2(r, rect.size.y - r * 2.0)), color)
-	draw_circle(rect.position + Vector2(r,                r),                r, color)
-	draw_circle(rect.position + Vector2(rect.size.x - r,  r),                r, color)
-	draw_circle(rect.position + Vector2(r,                rect.size.y - r),  r, color)
-	draw_circle(rect.position + Vector2(rect.size.x - r,  rect.size.y - r), r, color)
-
-func _draw_rrect_outline(rect: Rect2, r: float, color: Color, width: float) -> void:
-	var x1 := rect.position.x;         var y1 := rect.position.y
-	var x2 := rect.position.x + rect.size.x; var y2 := rect.position.y + rect.size.y
-	draw_line(Vector2(x1 + r, y1), Vector2(x2 - r, y1), color, width)
-	draw_line(Vector2(x1 + r, y2), Vector2(x2 - r, y2), color, width)
-	draw_line(Vector2(x1, y1 + r), Vector2(x1, y2 - r), color, width)
-	draw_line(Vector2(x2, y1 + r), Vector2(x2, y2 - r), color, width)
-	draw_arc(Vector2(x1 + r, y1 + r), r, PI,           PI * 1.5, 8, color, width)
-	draw_arc(Vector2(x2 - r, y1 + r), r, PI * 1.5,     TAU,      8, color, width)
-	draw_arc(Vector2(x2 - r, y2 - r), r, 0.0,          PI * 0.5, 8, color, width)
-	draw_arc(Vector2(x1 + r, y2 - r), r, PI * 0.5,     PI,       8, color, width)
-
-func _build_label() -> void:
-	name_label          = Label.new()
-	name_label.text     = display_label
-	name_label.position = Vector2(-5, -14)
-	add_child(name_label)
-
 func refresh_hp_bar() -> void:
-	queue_redraw()
+	# TODO Mốc 5: cập nhật HP bar 3D (Label3D hoặc mesh segments)
+	pass
 
 # ═══════════════════════════════════════════════════════════════════
 #  ATTACK CYCLING

@@ -124,7 +124,7 @@ func _spawn_players() -> void:
 	var hp_overrides  : Dictionary = SCENARIOS[ACTIVE_SCENARIO].get("hp",      {})
 	var offset = _grid_center_offset()
 	for preset_name in PlayerScript.PLAYER_ORDER:
-		var p = PlayerScene.instantiate()
+		var p = PlayerScenes[preset_name].instantiate()
 		add_child(p)
 		p.setup_from_preset(preset_name)
 		if pos_overrides.has(preset_name):

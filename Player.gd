@@ -1,4 +1,4 @@
-extends Node2D
+extends Node3D
 
 # ═══════════════════════════════════════════════════════════════════
 #  CHARACTER PRESETS
@@ -11,13 +11,14 @@ const PLAYER_ORDER : Array = ["Sonny", "Mike"]
 
 const CHARACTER_PRESETS : Dictionary = {
 	"Sonny": {
-		"max_hp":           4,       # starting / max HP
-		"equipped":         "pan",   # weapon key (see WEAPONS below)
-		"spawn_col":        0,       # grid column at combat start
-		"spawn_row":        4,       # grid row at combat start
-		"move_range":       2,       # BFS tiles per move action
-		"actions_per_turn": 2,       # actions available each turn
-		"uses_draw_shot":   false,   # set true to use Mike's aim/drag flow
+		"max_hp":           4,
+		"equipped":         "pan",
+		"spawn_col":        0,
+		"spawn_row":        4,
+		"move_range":       2,
+		"actions_per_turn": 2,
+		"uses_draw_shot":   false,
+		"body_color":       Color(0.93, 0.55, 0.25),   # cam ấm
 	},
 	"Mike": {
 		"max_hp":           3,
@@ -27,14 +28,12 @@ const CHARACTER_PRESETS : Dictionary = {
 		"move_range":       2,
 		"actions_per_turn": 2,
 		"uses_draw_shot":   true,
+		"body_color":       Color(0.30, 0.65, 0.95),   # xanh lam
 	},
 }
 
 # ═══════════════════════════════════════════════════════════════════
-#  WEAPON DEFINITIONS
-#  ► All attack tuning lives here.
-#  ► Keys used by main.gd: q_name, q_desc, q_dmg, q_mode, q_effect,
-#    q_range (ranged only), bounce_count (draw_shot only).
+#  WEAPON DEFINITIONS  (giữ nguyên — không dính 3D)
 # ═══════════════════════════════════════════════════════════════════
 
 const WEAPONS : Dictionary = {
@@ -73,7 +72,7 @@ const WEAPONS : Dictionary = {
 		"q_dmg":        1,                 "w_dmg":    1,
 		"q_mode":       "draw_shot",       "w_mode":   "grapple",
 		"q_effect":     "",                "w_effect": "",
-		"bounce_count": 1,     # ← tune ricochets here; picked up by BounceTracer
+		"bounce_count": 1,
 	},
 }
 
@@ -85,7 +84,7 @@ var grid_col : int = 5
 var grid_row : int = 4
 
 # ═══════════════════════════════════════════════════════════════════
-#  INSTANCE CONFIG  (written by setup_from_preset)
+#  INSTANCE CONFIG
 # ═══════════════════════════════════════════════════════════════════
 
 var character_name    : String = ""
@@ -102,58 +101,44 @@ var max_hp  : int = 4
 var armor   : int = 0
 
 var perfection     : int = 0
-var perfection_cap : int = 10   # doubled by Too Easy passive
+var perfection_cap : int = 10
 
 var actions_left  : int  = 2
 var has_attacked  : bool = false
 var disarmed      : bool = false
 var floor_cleared : bool = false
 
-var tiles_traveled_this_turn : int   = 0
-var swift_kill_count         : int   = 0
-var passives                 : Array = []
+var tiles_traveled_this_turn : int    = 0
+var swift_kill_count         : int    = 0
+var passives                 : Array  = []
 var equipped                 : String = "sword"
 
 # ═══════════════════════════════════════════════════════════════════
-#  NODES
+#  3D NODES (đến từ scene)
+#    - ModelPlaceholder : MeshInstance3D — placeholder body (CapsuleMesh).
+#      Để swap sang model thật: xoá node này, thay bằng .glb cùng tên,
+#      hoặc đổi `model_node` reference cho phù hợp.
+#    - NameLabel : Label3D billboard hiển thị tên trên đầu nhân vật.
 # ═══════════════════════════════════════════════════════════════════
 
-var armor_ring : Line2D = null
-var name_label : Label  = null
+var name_label : Label3D        = null
+var model_node : MeshInstance3D = null
+var armor_ring : Node           = null   # TODO Mốc 5: 3D armor visual
 
 func _ready() -> void:
-	name_label = Label.new()
-	add_child(name_label)
-	name_label.text                   = character_name if character_name != "" else "Player"
-	name_label.position               = Vector2(-20, -30)
-	name_label.horizontal_alignment   = HORIZONTAL_ALIGNMENT_CENTER
-	_build_armor_ring()
-
-func _draw() -> void:
-	draw_circle(Vector2.ZERO, 15, Color.BLUE)
-
-func _build_armor_ring() -> void:
-	armor_ring               = Line2D.new()
-	armor_ring.width         = 3.0
-	armor_ring.default_color = Color(0.39, 0.71, 1.0, 0.9)
-	armor_ring.closed        = true
-	var pts = PackedVector2Array()
-	for i in range(24):
-		var angle = deg_to_rad(360.0 / 24.0 * i)
-		pts.append(Vector2(cos(angle), sin(angle)) * 28.0)
-	armor_ring.points  = pts
-	armor_ring.visible = false
-	add_child(armor_ring)
+	name_label = get_node_or_null("NameLabel")
+	model_node = get_node_or_null("ModelPlaceholder")
+	if name_label and character_name != "":
+		name_label.text = character_name
 
 func refresh_visuals() -> void:
-	if armor_ring:
-		armor_ring.visible = armor > 0
+	# TODO Mốc 5: hiển thị armor ring 3D khi armor > 0
+	pass
 
 # ═══════════════════════════════════════════════════════════════════
 #  PRESET SETUP
 # ═══════════════════════════════════════════════════════════════════
 
-## Call this right after instantiation to apply a CHARACTER_PRESETS entry.
 func setup_from_preset(preset_name: String) -> void:
 	var p             = CHARACTER_PRESETS[preset_name]
 	character_name    = preset_name
@@ -168,13 +153,17 @@ func setup_from_preset(preset_name: String) -> void:
 	uses_draw_shot    = p["uses_draw_shot"]
 	if name_label:
 		name_label.text = preset_name
+	# Tô màu placeholder body theo preset (không ảnh hưởng khi đã thay model thật)
+	if model_node and model_node.material_override is StandardMaterial3D:
+		var mat : StandardMaterial3D = model_node.material_override
+		mat.albedo_color = p.get("body_color", Color.WHITE)
 
 # ═══════════════════════════════════════════════════════════════════
 #  TURN MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════
 
 func reset_turn() -> void:
-	actions_left             = actions_per_turn   # ← uses per-character value
+	actions_left             = actions_per_turn
 	has_attacked             = false
 	armor                    = 0
 	disarmed                 = false

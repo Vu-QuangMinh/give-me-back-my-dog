@@ -1,0 +1,141 @@
+[gd_scene format=3 uid="uid://b8hudm0ckm0c5"]
+
+[ext_resource type="Script" path="res://hud.gd" id="1_hud"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/panel.png" id="2_panel"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/scroll.png" id="3_scroll"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_backpack.png" id="4_btn_bp_n"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_backpack_pressed.png" id="5_btn_bp_p"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_undo.png" id="6_btn_un_n"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_undo_pressed.png" id="7_btn_un_p"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_reset.png" id="8_btn_rs_n"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_reset_pressed.png" id="9_btn_rs_p"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_endturn.png" id="10_btn_et_n"]
+[ext_resource type="Texture2D" path="res://CharacterAsset/HUD/panel/btn_endturn_pressed.png" id="11_btn_et_p"]
+
+[node name="HUD" type="CanvasLayer"]
+layer = 5
+script = ExtResource("1_hud")
+
+[node name="Root" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="PlayerPanel" type="TextureRect" parent="Root"]
+texture_filter = 1
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 36.0
+offset_top = -400.0
+offset_right = 546.0
+offset_bottom = -150.0
+texture = ExtResource("2_panel")
+expand_mode = 1
+stretch_mode = 0
+mouse_filter = 2
+
+[node name="PlayerInner" type="Control" parent="Root/PlayerPanel"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 29.0
+offset_top = 13.0
+offset_right = -29.0
+offset_bottom = -13.0
+mouse_filter = 2
+
+[node name="EnemyPanel" type="TextureRect" parent="Root"]
+texture_filter = 1
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -546.0
+offset_top = -400.0
+offset_right = -36.0
+offset_bottom = -150.0
+texture = ExtResource("2_panel")
+expand_mode = 1
+stretch_mode = 0
+mouse_filter = 2
+
+[node name="EnemyInner" type="HBoxContainer" parent="Root/EnemyPanel"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 34.0
+offset_top = 13.0
+offset_right = -34.0
+offset_bottom = -13.0
+theme_override_constants/separation = 23
+mouse_filter = 2
+alignment = 1
+
+[node name="ButtonRow" type="HBoxContainer" parent="Root"]
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -190.0
+offset_top = -244.0
+offset_right = 190.0
+offset_bottom = -196.0
+theme_override_constants/separation = 8
+alignment = 1
+
+[node name="DialogueRect" type="TextureRect" parent="Root"]
+texture_filter = 1
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -270.0
+offset_top = -184.0
+offset_right = 270.0
+offset_bottom = -40.0
+texture = ExtResource("3_scroll")
+expand_mode = 1
+stretch_mode = 4
+mouse_filter = 2
+
+[node name="DialogueText" type="RichTextLabel" parent="Root/DialogueRect"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 64.0
+offset_top = 24.0
+offset_right = -64.0
+offset_bottom = -24.0
+mouse_filter = 2
+bbcode_enabled = true
+fit_content = true
+scroll_active = false
+
+[node name="BackpackBtn" type="TextureButton" parent="Root/ButtonRow"]
+texture_filter = 1
+custom_minimum_size = Vector2(88, 48)
+texture_normal = ExtResource("4_btn_bp_n")
+texture_pressed = ExtResource("5_btn_bp_p")
+ignore_texture_size = true
+stretch_mode = 5
+
+[node name="UndoBtn" type="TextureButton" parent="Root/ButtonRow"]
+texture_filter = 1
+custom_minimum_size = Vector2(88, 48)
+texture_normal = ExtResource("6_btn_un_n")
+texture_pressed = ExtResource("7_btn_un_p")
+ignore_texture_size = true
+stretch_mode = 5
+
+[node name="ResetBtn" type="TextureButton" parent="Root/ButtonRow"]
+texture_filter = 1
+custom_minimum_size = Vector2(88, 48)
+texture_normal = ExtResource("8_btn_rs_n")
+texture_pressed = ExtResource("9_btn_rs_p")
+ignore_texture_size = true
+stretch_mode = 5
+
+[node name="EndTurnBtn" type="TextureButton" parent="Root/ButtonRow"]
+texture_filter = 1
+custom_minimum_size = Vector2(88, 48)
+texture_normal = ExtResource("10_btn_et_n")
+texture_pressed = ExtResource("11_btn_et_p")
+ignore_texture_size = true
+stretch_mode = 5
