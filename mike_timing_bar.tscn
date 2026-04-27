@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://c0qpek1ct5gbf"]
+
+[ext_resource type="Script" path="res://mike_timing_bar.gd" id="1_timing"]
+
+[node name="MikeTimingBar" type="Node3D"]
+script = ExtResource("1_timing")

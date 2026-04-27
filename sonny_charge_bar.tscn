@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://j4v8rddhhffj"]
+
+[ext_resource type="Script" path="res://sonny_charge_bar.gd" id="1_charge"]
+
+[node name="SonnyChargeBar" type="Node3D"]
+script = ExtResource("1_charge")

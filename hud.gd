@@ -13,6 +13,8 @@ signal backpack_pressed
 signal undo_pressed
 signal reset_pressed
 signal end_turn_pressed
+# Mốc 7+: click avatar HUD → switch sang nhân vật đó
+signal player_avatar_clicked(char_name: String)
 
 # ─── Asset preloads ──────────────────────────────────────────
 const TEX_HP_HEAD     := preload("res://CharacterAsset/HUD/panel/hp_head.png")
@@ -273,9 +275,14 @@ func _make_player_block(char_name: String, avatar_tex: Texture2D,
 	slot_col.add_child(slot_1["root"])
 	slot_col.add_child(slot_2["root"])
 
-	# Avatar frame (TextureRect bao avatar bên trong)
+	# Avatar frame (TextureRect bao avatar bên trong) — clickable để switch
 	var frame_holder := Control.new()
-	frame_holder.custom_minimum_size = AVATAR_SIZE
+	frame_holder.custom_minimum_size      = AVATAR_SIZE
+	frame_holder.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	frame_holder.pivot_offset             = AVATAR_SIZE * 0.5   # scale từ center
+	frame_holder.mouse_entered.connect(_on_avatar_hover_enter.bind(char_name))
+	frame_holder.mouse_exited.connect(_on_avatar_hover_exit.bind(char_name))
+	frame_holder.gui_input.connect(_on_avatar_gui_input.bind(char_name))
 
 	var frame_tr := TextureRect.new()
 	frame_tr.texture = frame_tex
@@ -326,7 +333,33 @@ func _make_player_block(char_name: String, avatar_tex: Texture2D,
 		"status_label": status_lbl,
 		"hp_container": hp_container,
 		"item_slots":   [slot_1, slot_2],
+		"frame_holder": frame_holder,
 	}
+
+# ─── Avatar hover + click handlers (Mốc 7+) ─────────────────
+
+func _on_avatar_hover_enter(char_name: String) -> void:
+	var block = _blocks.get(char_name)
+	if block == null: return
+	var holder : Control = block["frame_holder"]
+	if holder == null: return
+	var tw := create_tween()
+	tw.tween_property(holder, "scale", Vector2(1.15, 1.15), 0.12) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+func _on_avatar_hover_exit(char_name: String) -> void:
+	var block = _blocks.get(char_name)
+	if block == null: return
+	var holder : Control = block["frame_holder"]
+	if holder == null: return
+	var tw := create_tween()
+	tw.tween_property(holder, "scale", Vector2(1.0, 1.0), 0.12) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+func _on_avatar_gui_input(event: InputEvent, char_name: String) -> void:
+	if event is InputEventMouseButton \
+			and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		emit_signal("player_avatar_clicked", char_name)
 
 func _make_item_slot() -> Dictionary:
 	var holder := Control.new()

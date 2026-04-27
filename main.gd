@@ -38,7 +38,15 @@ const TWEEN_SPEED  : float = 0.18  # giây cho 1 lần move smooth
 const ACTION_DELAY : float = 0.5   # giây giữa các action liên tiếp của enemy
 
 # Mốc 6.3: DodgeBar minigame
-const DodgeBarScene = preload("res://dodge_bar.tscn")
+const DodgeBarScene  = preload("res://dodge_bar.tscn")
+# Mốc 7.1: Sonny charge bar (Boong)
+const ChargeBarScene = preload("res://sonny_charge_bar.tscn")
+# Mốc 8.1: Mike timing bar (Draw Shot)
+const TimingBarScene = preload("res://mike_timing_bar.tscn")
+# Mốc 7.3: Bomb fuse
+const BOMB_FUSE_TURNS    : int = 2
+const BOMB_AOE_DAMAGE    : int = 2
+const SONNY_BOMBS_PER_FLOOR : int = 1
 
 # ─── Camera rig ──────────────────────────────────────────────
 const CAM_PITCH_MIN     : float = 30.0
@@ -94,6 +102,16 @@ var player_names         : Array = []          # Array of String
 var current_player_index : int   = 0
 var enemies              : Array = []          # Array of Enemy nodes
 var valid_attack_targets : Array = []          # Array of Vector2i — enemy hex kề bên hiện tại có thể tấn công
+
+# Mốc 7 — Sonny charge bar + bomb state
+var sonny_charge_bar     : Node = null         # active charge bar instance (nếu đang giữ LMB)
+var sonny_charge_target  : Node = null         # enemy đang bị Sonny "Boong"
+var placing_bomb         : bool = false        # true khi Sonny đang chọn ô đặt bomb
+var sonny_bombs_left     : int  = SONNY_BOMBS_PER_FLOOR
+
+# Mốc 8 — Mike timing bar state
+var mike_timing_bar      : Node = null
+var mike_timing_target   : Node = null
 
 # ─── Turn state ──────────────────────────────────────────────
 enum Phase { PLAYER_TURN, ENEMY_TURN, DODGE_PHASE, DEAD }
@@ -247,6 +265,7 @@ func _ready() -> void:
 	_setup_demo_columns()   # TODO Mốc 9: xoá khi main_test có scenarios riêng
 	_spawn_players()
 	_spawn_enemies()
+	_face_all_players_to_enemies()
 	_update_valid_moves()
 	_save_turn_snapshot()
 	_refresh_tile_colors()
@@ -268,6 +287,8 @@ func _init_hud() -> void:
 	hud.undo_pressed.connect(_on_hud_undo)
 	hud.reset_pressed.connect(_on_hud_reset)
 	hud.backpack_pressed.connect(_on_hud_backpack)
+	# Click avatar HUD → switch sang nhân vật đó
+	hud.player_avatar_clicked.connect(_on_hud_avatar_clicked)
 
 	# Nạp state ban đầu cho 2 player
 	for i in range(players.size()):
@@ -322,6 +343,19 @@ func _on_hud_reset() -> void:
 	if phase == Phase.PLAYER_TURN:
 		_reset_turn()
 
+func _on_hud_avatar_clicked(char_name: String) -> void:
+	if phase != Phase.PLAYER_TURN: return
+	if sonny_charge_bar != null or mike_timing_bar != null: return
+	if placing_bomb: return
+	var idx : int = player_names.find(char_name)
+	if idx < 0 or idx == current_player_index: return
+	if players[idx].hp <= 0: return
+	current_player_index = idx
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+
 func _on_hud_backpack() -> void:
 	# Mốc 5 stub — backpack scene sẽ build sau Mốc 8/9
 	print("[HUD] Backpack pressed (stub)")
@@ -373,6 +407,34 @@ func _refresh_tile_colors() -> void:
 	if not players.is_empty():
 		cur_pos = player_positions[current_player_index]
 
+	# Bomb placement mode: highlight ô kề bên passable+empty (xanh "valid"),
+	# hover sẽ đỏ chói "attack" để báo "đặt ở đây?". Override hoàn toàn logic
+	# bình thường khi placing_bomb=true.
+	if placing_bomb and not players.is_empty():
+		var cur_p = players[current_player_index]
+		for key in tiles:
+			var tile = tiles[key]
+			if key in column_tiles or key in fire_pit_tiles:
+				tile.set_state("normal")
+				continue
+			var is_bomb_target : bool = (
+				_hex_dist(cur_p.grid_col, cur_p.grid_row, key.x, key.y) == 1
+				and is_valid_and_passable(key.x, key.y)
+				and _get_enemy_at(key) == null
+				and _get_player_at(key) < 0
+			)
+			if key == cur_pos:
+				tile.set_state("selected")
+			elif is_bomb_target and key == hover_hex:
+				tile.set_state("attack")
+			elif is_bomb_target:
+				tile.set_state("valid")
+			elif key in enemy_pos:
+				tile.set_state("enemy")
+			else:
+				tile.set_state("normal")
+		return
+
 	# Highlight rule (theo yêu cầu user):
 	#  ► Hover chỉ light-up nếu ô đó nằm trong valid_moves (xanh) hoặc là enemy có
 	#    thể đánh (Sonny kề bên / Mike LOS clear).
@@ -408,6 +470,35 @@ func entity_position(col: int, row: int) -> Vector3:
 	var p : Vector3 = hex_to_world(col, row)
 	p.y = GROUND_Y
 	return p
+
+func _face_player_to_nearest_enemy(idx: int) -> void:
+	if idx < 0 or idx >= players.size(): return
+	if enemies.is_empty(): return
+	var p = players[idx]
+	if p.hp <= 0: return
+	var nearest : Node = null
+	var best_d  : int  = 999
+	for e in enemies:
+		if not is_instance_valid(e): continue
+		if e.hp <= 0: continue
+		var d : int = _hex_dist(p.grid_col, p.grid_row, e.grid_col, e.grid_row)
+		if d < best_d:
+			best_d  = d
+			nearest = e
+	if nearest == null: return
+	var p_pos : Vector3 = entity_position(p.grid_col, p.grid_row)
+	var e_pos : Vector3 = entity_position(nearest.grid_col, nearest.grid_row)
+	if absf(e_pos.x - p_pos.x) < 0.001 and absf(e_pos.z - p_pos.z) < 0.001:
+		return
+	# look_at quay -Z local sang điểm target. Models .glb từ Mixamo/Blender
+	# thường face +Z (mesh forward) → cần xoay thêm 180° quanh Y để mặt thật
+	# của model hướng về enemy.
+	p.look_at(Vector3(e_pos.x, p_pos.y, e_pos.z), Vector3.UP)
+	p.rotate_object_local(Vector3.UP, PI)
+
+func _face_all_players_to_enemies() -> void:
+	for i in range(players.size()):
+		_face_player_to_nearest_enemy(i)
 
 func _spawn_players() -> void:
 	for preset_name in PlayerScript.PLAYER_ORDER:
@@ -527,12 +618,29 @@ func _move_entity_smooth(entity: Node, target_col: int, target_row: int) -> void
 func _move_player(dest: Vector2i) -> void:
 	var current_player = players[current_player_index]
 	if not current_player.can_act(): return
+	var src : Vector2i = player_positions[current_player_index]
+	var dist : int = _hex_dist(src.x, src.y, dest.x, dest.y)
 	player_positions[current_player_index] = dest
 	current_player.grid_col = dest.x
 	current_player.grid_row = dest.y
 	current_player.tiles_traveled_this_turn += 1
-	_move_entity_smooth(current_player, dest.x, dest.y)
+	# Run animation suốt thời gian tween + buffer để animation hiện rõ.
+	if current_player.has_method("play_run"):
+		current_player.play_run()
+	var move_pos : Vector3 = entity_position(dest.x, dest.y)
+	# Tween duration scale theo distance (khoảng 0.25s/hex), tối thiểu 0.30s
+	# để run animation kịp chạy 1 chu kỳ rõ ràng trước khi về idle.
+	var move_dur : float = maxf(0.30, 0.25 * float(dist))
+	var tween    := create_tween()
+	tween.set_ease(Tween.EASE_OUT)
+	tween.set_trans(Tween.TRANS_CUBIC)
+	tween.tween_property(current_player, "position", move_pos, move_dur)
+	# Buffer 0.15s sau tween rồi mới về idle, để run anim không bị cắt sớm.
+	tween.tween_interval(0.15)
+	if current_player.has_method("play_idle"):
+		tween.tween_callback(current_player.play_idle)
 	current_player.use_action()
+	_face_all_players_to_enemies()   # quay mặt về địch gần nhất
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_debug()
@@ -542,12 +650,266 @@ func _move_player(dest: Vector2i) -> void:
 #  COMBAT — PLAYER ATTACK (Mốc 6.1: melee cơ bản, chưa có minigame)
 # ═══════════════════════════════════════════════════════════
 
+# ─── LMB press / release dispatch ───────────────────────────
+
+func _handle_lmb_press(mouse_pos: Vector2) -> void:
+	if phase != Phase.PLAYER_TURN: return
+	if players.is_empty(): return
+	if sonny_charge_bar != null: return   # đang charge — bỏ qua press khác
+	if mike_timing_bar != null: return    # đang aim — bỏ qua
+	var hex : Vector2i = mouse_to_hex(mouse_pos)
+	if hex.x < 0: return
+	# Bomb placement mode (Sonny W) — click vào ô kề bên hợp lệ
+	if placing_bomb:
+		_place_bomb_at(hex)
+		return
+	# Click vào player KHÁC (còn sống) → switch sang nhân vật đó
+	var clicked_player_idx : int = _get_player_at(hex)
+	if clicked_player_idx >= 0 and clicked_player_idx != current_player_index \
+			and players[clicked_player_idx].hp > 0:
+		current_player_index = clicked_player_idx
+		_update_valid_moves()
+		_refresh_tile_colors()
+		_refresh_debug()
+		_refresh_hud()
+		return
+	var target_enemy : Node = _get_enemy_at(hex)
+	var current_player          = players[current_player_index]
+	# Click enemy + còn action + đánh được:
+	#   - Sonny (uses_draw_shot=false): mở charge bar (HOLD)
+	#   - Mike  (uses_draw_shot=true) : mở timing bar (HOLD + DRAG)
+	if target_enemy != null and current_player.can_act() \
+			and _can_attack_target(current_player.grid_col,
+				current_player.grid_row, hex.x, hex.y):
+		if current_player.uses_draw_shot:
+			_start_mike_timing(target_enemy, mouse_pos)
+		else:
+			_start_sonny_charge(target_enemy)
+		return
+	if hex in valid_moves:
+		_move_player(hex)
+
+func _handle_lmb_release() -> void:
+	if sonny_charge_bar != null and is_instance_valid(sonny_charge_bar):
+		sonny_charge_bar.resolve()
+	elif mike_timing_bar != null and is_instance_valid(mike_timing_bar):
+		mike_timing_bar.resolve()
+
+# Gọi từ _input(InputEventMouseMotion). Nếu Mike đang aim, update drag.
+func _handle_mouse_motion(mouse_pos: Vector2) -> void:
+	if mike_timing_bar != null and is_instance_valid(mike_timing_bar):
+		mike_timing_bar.update_drag(mouse_pos)
+
+# ═══════════════════════════════════════════════════════════
+#  SONNY CHARGE BAR — Mốc 7.2 (Q / Boong)
+# ═══════════════════════════════════════════════════════════
+
+func _start_sonny_charge(target_enemy: Node) -> void:
+	var current_player = players[current_player_index]
+	if not current_player.can_act(): return
+	var bar = ChargeBarScene.instantiate()
+	bar.is_holding = true   # bắt đầu hold ngay (LMB đang được nhấn)
+	bar.charge_resolved.connect(_on_charge_resolved.bind(target_enemy))
+	camera.add_child(bar)
+	bar.position = Vector3(0.0, -0.18, -1.2)
+	sonny_charge_bar    = bar
+	sonny_charge_target = target_enemy
+
+func _on_charge_resolved(result: String, target_enemy: Node) -> void:
+	sonny_charge_bar    = null
+	sonny_charge_target = null
+	if not is_instance_valid(target_enemy):
+		_refresh_debug()
+		return
+	var current_player = players[current_player_index]
+	var base_dmg : int = current_player.get_q_dmg()
+	var dmg      : int = 0
+	match result:
+		"perfect": dmg = int(round(base_dmg * 1.5 + 0.4))   # 1×1.5≈2, 2×1.5=3
+		"normal":  dmg = base_dmg
+		"miss":    dmg = 0
+	if dmg > 0:
+		if current_player.has_method("play_attack"):
+			current_player.play_attack()
+		target_enemy.take_damage(dmg)
+		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
+			"-%d" % dmg, Color(1.0, 0.55, 0.30))
+		if target_enemy.hp <= 0:
+			_kill_enemy(target_enemy)
+		else:
+			if hud != null:
+				hud.update_enemy_hp(target_enemy.get_instance_id(),
+					target_enemy.hp, target_enemy.max_hp)
+	else:
+		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
+			"MISS!", Color(0.7, 0.7, 0.7))
+	current_player.use_action()
+	current_player.has_attacked = true
+	attack_committed_this_round = true
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+	_check_floor_clear()
+
+# ═══════════════════════════════════════════════════════════
+#  MIKE TIMING BAR — Mốc 8.1/8.2 (Draw Shot)
+# ═══════════════════════════════════════════════════════════
+
+func _start_mike_timing(target_enemy: Node, mouse_pos: Vector2) -> void:
+	var current = players[current_player_index]
+	if not current.can_act(): return
+	var bar = TimingBarScene.instantiate()
+	bar.timing_resolved.connect(_on_mike_timing_resolved.bind(target_enemy))
+	camera.add_child(bar)
+	bar.position = Vector3(0.0, -0.18, -1.2)
+	bar.setup(mouse_pos)   # drag_anchor = vị trí chuột lúc click
+	mike_timing_bar    = bar
+	mike_timing_target = target_enemy
+
+func _on_mike_timing_resolved(result: String, target_enemy: Node) -> void:
+	mike_timing_bar    = null
+	mike_timing_target = null
+	if not is_instance_valid(target_enemy):
+		_refresh_debug()
+		return
+	var current = players[current_player_index]
+	var base_dmg : int = current.get_q_dmg()
+	var dmg      : int = 0
+	match result:
+		"perfect": dmg = int(round(base_dmg * 1.5 + 0.4))
+		"hit":     dmg = base_dmg
+		"miss":    dmg = 0
+	if dmg > 0:
+		if current.has_method("play_attack"):
+			current.play_attack()
+		target_enemy.take_damage(dmg)
+		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
+			"-%d" % dmg, Color(1.0, 0.55, 0.30))
+		if target_enemy.hp <= 0:
+			_kill_enemy(target_enemy)
+		else:
+			if hud != null:
+				hud.update_enemy_hp(target_enemy.get_instance_id(),
+					target_enemy.hp, target_enemy.max_hp)
+	else:
+		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
+			"MISS!", Color(0.7, 0.7, 0.7))
+	current.use_action()
+	current.has_attacked = true
+	attack_committed_this_round = true
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+	_check_floor_clear()
+
+# ═══════════════════════════════════════════════════════════
+#  SONNY BOMB — Mốc 7.3 (W key)
+# ═══════════════════════════════════════════════════════════
+
+# W key: toggle bomb placement mode (Sonny only, có bomb còn lại, còn action).
+func _toggle_bomb_placement() -> void:
+	if phase != Phase.PLAYER_TURN: return
+	if players.is_empty(): return
+	var current = players[current_player_index]
+	if current.uses_draw_shot: return       # Mike không có bomb
+	if not current.can_act(): return
+	if sonny_bombs_left <= 0: return
+	if sonny_charge_bar != null: return
+	placing_bomb = not placing_bomb
+	_refresh_tile_colors()
+	_refresh_debug()
+
+func _place_bomb_at(hex: Vector2i) -> void:
+	if not placing_bomb: return
+	var current = players[current_player_index]
+	var d : int = _hex_dist(current.grid_col, current.grid_row, hex.x, hex.y)
+	if d != 1: return
+	if not is_valid_and_passable(hex.x, hex.y): return
+	if _get_enemy_at(hex) != null: return
+	if _get_player_at(hex) >= 0: return
+
+	var bomb = _spawn_enemy("bomb", hex.x, hex.y)
+	bomb.fuse_turns = BOMB_FUSE_TURNS
+	# Fuse countdown Label3D trên đầu bomb
+	var fuse_label := Label3D.new()
+	fuse_label.name                = "FuseLabel"
+	fuse_label.text                = "FUSE %d" % bomb.fuse_turns
+	fuse_label.font_size           = 56
+	fuse_label.pixel_size          = 0.005
+	fuse_label.outline_size        = 6
+	fuse_label.outline_modulate    = Color(0, 0, 0, 0.95)
+	fuse_label.modulate            = Color(1.0, 0.5, 0.1)
+	fuse_label.position            = Vector3(0, 1.7, 0)
+	fuse_label.no_depth_test       = true
+	fuse_label.billboard           = BaseMaterial3D.BILLBOARD_ENABLED
+	bomb.add_child(fuse_label)
+	# HUD register — bomb hiện trong enemy panel với label "B"
+	if hud != null:
+		hud.register_enemy(bomb.get_instance_id(), "BOMB", bomb.hp, bomb.max_hp,
+			bomb.display_label, bomb.body_color)
+	sonny_bombs_left -= 1
+	placing_bomb       = false
+	current.use_action()
+	attack_committed_this_round = true
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+
+# Sau mỗi enemy turn, decrement fuse + explode bomb hết hạn.
+func _tick_bombs_after_enemy_turn() -> void:
+	var to_explode : Array = []
+	for e in enemies.duplicate():
+		if not is_instance_valid(e): continue
+		if e.enemy_type != "bomb": continue
+		e.fuse_turns -= 1
+		var label = e.get_node_or_null("FuseLabel")
+		if label:
+			label.text = "FUSE %d" % maxi(e.fuse_turns, 0)
+		if e.fuse_turns <= 0:
+			to_explode.append(e)
+	for bomb in to_explode:
+		await _explode_bomb(bomb)
+
+# Bomb nổ: AOE = bomb tile + 6 ô kề. Damage tất cả entities (enemies + players).
+func _explode_bomb(bomb: Node) -> void:
+	var bomb_col : int = bomb.grid_col
+	var bomb_row : int = bomb.grid_row
+	var center   : Vector3 = bomb.position
+	_spawn_damage_popup(center + Vector3(0, 1.5, 0), "BOOM!",
+		Color(1.0, 0.55, 0.10))
+	var aoe : Array = [Vector2i(bomb_col, bomb_row)]
+	for nb in _get_neighbors(bomb_col, bomb_row):
+		aoe.append(nb)
+	for hex in aoe:
+		var e_in : Node = _get_enemy_at(hex)
+		if e_in != null and e_in != bomb:
+			e_in.take_damage(BOMB_AOE_DAMAGE)
+			_spawn_damage_popup(e_in.position + Vector3(0, 1.8, 0),
+				"-%d" % BOMB_AOE_DAMAGE, Color(1.0, 0.55, 0.30))
+			if e_in.hp <= 0:
+				_kill_enemy(e_in)
+			else:
+				if hud != null:
+					hud.update_enemy_hp(e_in.get_instance_id(),
+						e_in.hp, e_in.max_hp)
+		var p_idx : int = _get_player_at(hex)
+		if p_idx >= 0:
+			_apply_damage_to_player(p_idx, BOMB_AOE_DAMAGE, "hit")
+	_kill_enemy(bomb)
+	_check_floor_clear()
+	await get_tree().create_timer(0.3).timeout
+
 # Player tấn công melee enemy kề bên: damage = q_dmg của weapon hiện tại.
-# Mốc 7 sẽ thay attack của Sonny bằng charge_bar minigame; Mốc 8 sẽ thay
-# Mike bằng draw_shot ranged. Hiện cả hai dùng melee cơ bản range=1.
+# Mốc 7 thay Sonny bằng charge_bar minigame (xem _start_sonny_charge);
+# hàm này còn dùng cho Mike (uses_draw_shot) — instant click attack.
 func _player_attack_enemy(enemy: Node) -> void:
 	var current_player = players[current_player_index]
 	if not current_player.can_act(): return
+	if current_player.has_method("play_attack"):
+		current_player.play_attack()
 	var dmg : int = current_player.get_q_dmg()
 	enemy.take_damage(dmg)
 	current_player.use_action()
@@ -576,6 +938,7 @@ func _kill_enemy(enemy: Node) -> void:
 # Khi hết enemies → floor clear. Mốc 9 sẽ wire vào world_map transition.
 func _check_floor_clear() -> void:
 	if enemies.is_empty():
+		sonny_bombs_left = SONNY_BOMBS_PER_FLOOR   # reset bombs cho floor mới
 		print("[FLOOR CLEAR] All enemies defeated. (TODO Mốc 9: world map transition)")
 
 # ─── Polish helpers (Mốc 6.5) ───────────────────────────────
@@ -646,9 +1009,13 @@ func _run_enemy_turn() -> void:
 	for enemy in enemies.duplicate():
 		if not is_instance_valid(enemy): continue
 		if enemy.hp <= 0: continue
+		if enemy.enemy_type == "bomb": continue   # bomb không tự act trong enemy turn
 		if _all_players_dead(): break
 		await _run_enemy_actions(enemy)
 		await get_tree().create_timer(ACTION_DELAY * 0.4).timeout
+
+	# Decrement fuse + nổ bomb hết hạn (Mốc 7.3)
+	await _tick_bombs_after_enemy_turn()
 
 	if _all_players_dead():
 		phase = Phase.DEAD
@@ -668,6 +1035,7 @@ func _run_enemy_turn() -> void:
 			break
 	phase = Phase.PLAYER_TURN
 	_save_turn_snapshot()
+	_face_all_players_to_enemies()   # quay lại sau khi enemy đã di chuyển
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_debug()
@@ -732,16 +1100,11 @@ func _build_occupied(exclude_enemy: Node) -> Dictionary:
 func _enemy_perform_attack(enemy: Node, target_idx: int) -> void:
 	var attack : Dictionary = enemy.get_current_attack()
 	if attack.is_empty(): return
-	var atk_range : int = int(attack.get("range", 1))
-	if atk_range == 1:
-		# Telegraph (flash ô target đỏ) rồi DodgeBar.
-		await _telegraph_attack(target_idx)
-		await _trigger_dodge_bar(enemy, target_idx, attack)
-	else:
-		# Ranged → projectile sẽ làm ở Mốc 8. Tạm: damage thẳng.
-		await _telegraph_attack(target_idx)
-		var dmg : int = int(attack.get("damage", 1))
-		_apply_damage_to_player(target_idx, dmg, "hit")
+	# Mọi enemy attack (cả melee range=1 và ranged range>1) hiện DodgeBar để
+	# player có cơ hội né. Mốc 9+ sẽ thay ranged attack bằng projectile bounce
+	# system (port từ bounce.gd). Hiện tại ranged dùng cùng DodgeBar.
+	await _telegraph_attack(target_idx)
+	await _trigger_dodge_bar(enemy, target_idx, attack)
 	enemy.advance_attack()
 
 # Flash ô target 3 nhịp đỏ ↔ thường (~0.4s) để player thấy ai sắp bị đánh.
@@ -1029,8 +1392,13 @@ func _pick_entity_hex(origin: Vector3, dir: Vector3) -> Vector2i:
 # ═══════════════════════════════════════════════════════════
 
 func _input(event: InputEvent) -> void:
-	# ESC = thoát game (đặc biệt cần khi đang fullscreen)
+	# ESC = cancel bomb mode trước, sau đó mới quit game
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		if placing_bomb:
+			placing_bomb = false
+			_refresh_tile_colors()
+			_refresh_debug()
+			return
 		get_tree().quit()
 		return
 
@@ -1064,6 +1432,9 @@ func _input(event: InputEvent) -> void:
 			KEY_K:
 				if phase == Phase.PLAYER_TURN:
 					_reset_turn()
+			KEY_W:
+				if phase == Phase.PLAYER_TURN:
+					_toggle_bomb_placement()
 			KEY_ENTER, KEY_KP_ENTER:
 				if phase == Phase.DEAD:
 					_restart_game()
@@ -1093,29 +1464,20 @@ func _input(event: InputEvent) -> void:
 			_update_camera()
 			_refresh_debug()
 			return   # bỏ qua hover update khi đang xoay
+		# Mike đang aim → drag chuột cập nhật drag_center của timing bar.
+		_handle_mouse_motion(event.position)
 		var hex : Vector2i = mouse_to_hex(event.position)
 		if hex != hover_hex:
 			hover_hex = hex
 			_refresh_tile_colors()
 			_refresh_debug()
 
-	if event is InputEventMouseButton \
-			and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-		if phase == Phase.PLAYER_TURN:
-			var hex : Vector2i = mouse_to_hex(event.position)
-			if hex.x >= 0 and not players.is_empty():
-				var target_enemy : Node = _get_enemy_at(hex)
-				var current_player          = players[current_player_index]
-				# Click vào enemy + còn action + đánh được → attack
-				# (Sonny: kề bên, Mike: LOS clear). Check nhất quán với
-				# valid_attack_targets qua _can_attack_target.
-				if target_enemy != null and current_player.can_act() \
-						and _can_attack_target(current_player.grid_col,
-							current_player.grid_row, hex.x, hex.y):
-					_player_attack_enemy(target_enemy)
-					return
-				if hex in valid_moves:
-					_move_player(hex)
+	# LMB press / release — split để Sonny giữ-thả LMB cho Boong charge bar.
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_handle_lmb_press(event.position)
+		else:
+			_handle_lmb_release()
 
 func _refresh_debug() -> void:
 	if not debug_label: return
@@ -1126,6 +1488,9 @@ func _refresh_debug() -> void:
 		debug_label.text = "pitch %.0f° yaw %.0f° dist %.0f  hover=%s" \
 			% [camera_pitch_deg, camera_yaw_deg, camera_distance, str(hover_hex)]
 		return
+	if placing_bomb:
+		debug_label.text = "[PLACING BOMB] click ô kề bên (passable) để đặt — ESC = cancel"
+		return
 	var cur = players[current_player_index]
 	var phase_str : String
 	match phase:
@@ -1133,11 +1498,19 @@ func _refresh_debug() -> void:
 		Phase.ENEMY_TURN:  phase_str = "ENEMY"
 		Phase.DODGE_PHASE: phase_str = "DODGE!"
 		_:                 phase_str = "?"
-	debug_label.text = "[%s] %s HP %d/%d  Act %d/%d   |   LMB=attack/move  Tab=switch  D=end  U=undo  K=reset  SPACE=dodge   |   pitch %.0f° dist %.0f" \
+	# Hints khác nhau cho Sonny (Boong + bomb) vs Mike (ranged)
+	var hints : String
+	if cur.uses_draw_shot:
+		hints = "LMB=move/shoot  Tab=swap  D=end  SPACE=dodge"
+	else:
+		hints = "LMB=move/Boong(hold)  W=Bomb(%d)  Tab=swap  D=end  SPACE=dodge" \
+			% sonny_bombs_left
+	debug_label.text = "[%s] %s HP %d/%d  Act %d/%d   |   %s   |   pitch %.0f° dist %.0f" \
 		% [
 			phase_str,
 			player_names[current_player_index],
 			cur.hp, cur.max_hp,
 			cur.actions_left, cur.actions_per_turn,
+			hints,
 			camera_pitch_deg, camera_distance
 		]

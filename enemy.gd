@@ -145,6 +145,7 @@ var bleed_stacks           : int   = 0
 var disarmed_turns         : int   = 0
 var attack_index           : int   = 0
 var has_attacked_this_turn : bool  = false
+var fuse_turns             : int   = 0   # Mốc 7: chỉ dùng cho type "bomb"
 
 # ═══════════════════════════════════════════════════════════════════
 #  3D NODES (từ scene)
@@ -160,9 +161,13 @@ func _ready() -> void:
 	model_node = get_node_or_null("ModelPlaceholder")
 	if name_label:
 		name_label.text = display_label
-	# Tô placeholder body bằng màu của preset (không ảnh hưởng khi đã thay model thật)
+	# Tô placeholder body bằng màu của preset (không ảnh hưởng khi đã thay model thật).
+	# QUAN TRỌNG: duplicate material để mỗi enemy có instance riêng — enemy.tscn
+	# có 1 sub_resource Mat_enemy, nếu không duplicate thì 3 enemy share chung
+	# material → tween alpha của 1 con sẽ làm các con khác cũng tàng hình.
 	if model_node and model_node.material_override is StandardMaterial3D:
-		var mat : StandardMaterial3D = model_node.material_override
+		var mat : StandardMaterial3D = model_node.material_override.duplicate()
+		model_node.material_override = mat
 		mat.albedo_color = body_color
 
 func setup(col: int, row: int) -> void:

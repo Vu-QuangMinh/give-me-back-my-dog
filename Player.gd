@@ -121,15 +121,124 @@ var equipped                 : String = "sword"
 #    - NameLabel : Label3D billboard hiển thị tên trên đầu nhân vật.
 # ═══════════════════════════════════════════════════════════════════
 
-var name_label : Label3D        = null
-var model_node : MeshInstance3D = null
-var armor_ring : Node           = null   # TODO Mốc 5: 3D armor visual
+var name_label : Label3D = null
+var model_node : Node3D  = null   # initial .glb instance từ scene (idle)
+var armor_ring : Node    = null   # TODO Mốc 5: 3D armor visual
+
+# Multi-model animation system (swap visibility, không inject).
+# Mỗi state có 1 .glb riêng → preload + instantiate đầy đủ; play() tự chạy
+# animation đầu tiên của model đó.
+const MODEL_PATHS_BY_CHAR : Dictionary = {
+	"Sonny": {
+		"idle":   "res://CharacterAsset/Sonny/Sonny Idle.glb",
+		"run":    "res://CharacterAsset/Sonny/Sonny Run.glb",
+		"attack": "res://CharacterAsset/Sonny/Sonny Combo Attack.glb",
+	},
+	"Mike": {
+		"idle":   "res://CharacterAsset/Mike/Mike idle.glb",
+		"run":    "res://CharacterAsset/Mike/Mike Run.glb",
+		"attack": "res://CharacterAsset/Mike/Mike Skill.glb",
+	},
+}
+
+var models_by_state : Dictionary = {}   # "idle"/"run"/"attack" → Node3D instance
+var current_state   : String     = "idle"
 
 func _ready() -> void:
 	name_label = get_node_or_null("NameLabel")
 	model_node = get_node_or_null("ModelPlaceholder")
 	if name_label and character_name != "":
 		name_label.text = character_name
+	# Note: _try_play_default_animation() được dời sang cuối setup_from_preset
+	# vì lúc _ready chạy character_name vẫn còn rỗng (main.gd gọi
+	# setup_from_preset sau add_child).
+
+# Pre-instantiate 3 models (idle, run, attack), tất cả thành con của Player
+# với cùng transform (scale từ tscn). Hide tất cả trừ idle ban đầu.
+# Mỗi model có AnimationPlayer riêng tự auto-play khi visible.
+func _try_play_default_animation() -> void:
+	if model_node == null: return
+	var base_xform : Transform3D = model_node.transform
+	models_by_state["idle"] = model_node
+	_setup_animation(model_node, true)
+
+	# Pre-instantiate run + attack models — visible=false ban đầu, swap khi cần.
+	var paths : Dictionary = MODEL_PATHS_BY_CHAR.get(character_name, {})
+	for state in ["run", "attack"]:
+		if not paths.has(state): continue
+		var path : String = paths[state]
+		if not ResourceLoader.exists(path): continue
+		var packed = load(path)
+		if packed == null: continue
+		var raw_inst = packed.instantiate()
+		var inst : Node3D = raw_inst as Node3D
+		if inst == null:
+			raw_inst.queue_free()
+			continue
+		inst.transform = base_xform
+		inst.visible   = false
+		add_child(inst)
+		models_by_state[state] = inst
+		_setup_animation(inst, state == "run")
+
+	current_state = "idle"
+
+# Hook AnimationPlayer của 1 model: set loop cho idle/run, 1-shot cho attack.
+# Connect animation_finished cho attack → play_idle.
+func _setup_animation(model: Node, should_loop: bool) -> void:
+	var ap : AnimationPlayer = _find_animation_player(model)
+	if ap == null: return
+	var anims : PackedStringArray = ap.get_animation_list()
+	if anims.is_empty(): return
+	var first : String = anims[0]
+	var anim : Animation = ap.get_animation(first)
+	if anim:
+		anim.loop_mode = (Animation.LOOP_LINEAR if should_loop else Animation.LOOP_NONE)
+	# Auto play để model không bị T-pose lúc visible
+	ap.play(first)
+	# Attack model: khi animation_finished → revert idle
+	if not should_loop:
+		if not ap.animation_finished.is_connected(_on_attack_anim_finished):
+			ap.animation_finished.connect(_on_attack_anim_finished)
+
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node is AnimationPlayer:
+		return node
+	for child in node.get_children():
+		var found : AnimationPlayer = _find_animation_player(child)
+		if found:
+			return found
+	return null
+
+# ─── Public API: play idle / run / attack ─────────────────
+
+func play_idle() -> void:
+	_swap_state("idle")
+
+func play_run() -> void:
+	_swap_state("run")
+
+func play_attack() -> void:
+	# Restart attack animation từ đầu (vì cùng instance dùng lại)
+	_swap_state("attack")
+	if models_by_state.has("attack"):
+		var ap : AnimationPlayer = _find_animation_player(models_by_state["attack"])
+		if ap and not ap.get_animation_list().is_empty():
+			ap.play(ap.get_animation_list()[0])
+
+func _swap_state(new_state: String) -> void:
+	if new_state == current_state: return
+	if not models_by_state.has(new_state): return
+	for s in models_by_state.keys():
+		var m = models_by_state[s]
+		if is_instance_valid(m):
+			m.visible = (s == new_state)
+	current_state = new_state
+
+func _on_attack_anim_finished(_anim_name: String) -> void:
+	# Sau attack → quay về idle
+	if current_state == "attack":
+		play_idle()
 
 func refresh_visuals() -> void:
 	# TODO Mốc 5: hiển thị armor ring 3D khi armor > 0
@@ -153,10 +262,14 @@ func setup_from_preset(preset_name: String) -> void:
 	uses_draw_shot    = p["uses_draw_shot"]
 	if name_label:
 		name_label.text = preset_name
-	# Tô màu placeholder body theo preset (không ảnh hưởng khi đã thay model thật)
-	if model_node and model_node.material_override is StandardMaterial3D:
+	# Tô màu placeholder body theo preset (chỉ áp dụng khi vẫn dùng capsule
+	# placeholder; với .glb instance bỏ qua vì có texture riêng).
+	if model_node is MeshInstance3D and model_node.material_override is StandardMaterial3D:
 		var mat : StandardMaterial3D = model_node.material_override
 		mat.albedo_color = p.get("body_color", Color.WHITE)
+	# Animation system cần character_name để tra MODEL_PATHS_BY_CHAR → gọi
+	# tại đây sau khi name đã set, không phải trong _ready.
+	_try_play_default_animation()
 
 # ═══════════════════════════════════════════════════════════════════
 #  TURN MANAGEMENT
