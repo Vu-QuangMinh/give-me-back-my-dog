@@ -56,6 +56,9 @@ material_override = SubResource("Mat_ground")
 
 [node name="GameHUD" parent="." instance=ExtResource("2_hud")]
 
+[node name="CombatLayer" type="CanvasLayer" parent="."]
+layer = 10
+
 [node name="HUD" type="CanvasLayer" parent="."]
 
 [node name="DebugLabel" type="Label" parent="HUD"]

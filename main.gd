@@ -35,6 +35,10 @@ const GRID_COLS    : int   = 12
 const GRID_ROWS    : int   = 8
 const GROUND_Y     : float = 0.2   # = HexTile.TILE_HEIGHT (mặt trên tile, nơi entities đứng)
 const TWEEN_SPEED  : float = 0.18  # giây cho 1 lần move smooth
+const ACTION_DELAY : float = 0.5   # giây giữa các action liên tiếp của enemy
+
+# Mốc 6.3: DodgeBar minigame
+const DodgeBarScene = preload("res://dodge_bar.tscn")
 
 # ─── Camera rig ──────────────────────────────────────────────
 const CAM_PITCH_MIN     : float = 30.0
@@ -52,17 +56,19 @@ const REF_WIDTH  : float = 1920.0
 const REF_HEIGHT : float = 1080.0
 
 @export var camera_pitch_deg : float = 41.0
-# yaw=-90° → camera đứng phía nam (sau lưng Sonny/Mike vốn spawn ở row=1, cạnh nam),
-# nhìn về hướng bắc (về phía enemies ở row cao hơn).
-@export var camera_yaw_deg   : float = -90.0
+# yaw=180° → camera đứng phía TÂY của grid (sau lưng Sonny/Mike vốn spawn ở col=0,
+# cạnh tây), nhìn về hướng ĐÔNG nơi enemies ở col=8-10. Player ở foreground, map
+# trải dài về phía trước.
+@export var camera_yaw_deg   : float = 180.0
 @export var camera_distance  : float = 37.0
 
 var rmb_dragging       : bool  = false
 var window_zoom_factor : float = 1.0   # = min(width/REF_WIDTH, height/REF_HEIGHT)
 
-@onready var camera      : Camera3D    = $Camera3D
-@onready var debug_label : Label       = $HUD/DebugLabel
-@onready var hud                       = $GameHUD
+@onready var camera        : Camera3D    = $Camera3D
+@onready var debug_label   : Label       = $HUD/DebugLabel
+@onready var hud                         = $GameHUD
+@onready var combat_layer  : CanvasLayer = $CombatLayer
 
 # Item icons cho HUD slot (Mốc 5: chỉ lv1 — upgrade system ở sau)
 const ITEM_ICONS_BY_CHAR : Dictionary = {
@@ -87,6 +93,7 @@ var player_positions     : Array = []          # Array of Vector2i
 var player_names         : Array = []          # Array of String
 var current_player_index : int   = 0
 var enemies              : Array = []          # Array of Enemy nodes
+var valid_attack_targets : Array = []          # Array of Vector2i — enemy hex kề bên hiện tại có thể tấn công
 
 # ─── Turn state ──────────────────────────────────────────────
 enum Phase { PLAYER_TURN, ENEMY_TURN, DODGE_PHASE, DEAD }
@@ -154,6 +161,63 @@ func _hex_dist(c1: int, r1: int, c2: int, r2: int) -> int:
 	var a = to_cube.call(c1, r1)
 	var b = to_cube.call(c2, r2)
 	return maxi(maxi(abs(a.x - b.x), abs(a.y - b.y)), abs(a.z - b.z))
+
+# ── Hex line drawing & line-of-sight ────────────────────────
+# Trả về list các hex từ (c1,r1) đến (c2,r2) bao gồm cả 2 đầu.
+# Dùng cube interpolation + cube_round (chuẩn redblobgames).
+func _hex_line(c1: int, r1: int, c2: int, r2: int) -> Array:
+	var n : int = _hex_dist(c1, r1, c2, r2)
+	var path : Array = []
+	if n <= 0:
+		path.append(Vector2i(c1, r1))
+		return path
+	var a : Vector3 = _to_cube_f(c1, r1)
+	var b : Vector3 = _to_cube_f(c2, r2)
+	# Epsilon nudge để ray đúng tâm cạnh không bị tie ngẫu nhiên
+	a += Vector3(1e-6, 2e-6, -3e-6)
+	b += Vector3(1e-6, 2e-6, -3e-6)
+	for i in range(n + 1):
+		var t : float = float(i) / float(n)
+		var rounded : Vector3 = _cube_round(a.lerp(b, t))
+		path.append(_from_cube_f(rounded))
+	return path
+
+func _to_cube_f(col: int, row: int) -> Vector3:
+	var x : float = float(col)
+	var z : float = float(row - (col - (col & 1)) / 2)
+	var y : float = -x - z
+	return Vector3(x, y, z)
+
+func _from_cube_f(c: Vector3) -> Vector2i:
+	var col : int = int(c.x)
+	var row : int = int(c.z) + (col - (col & 1)) / 2
+	return Vector2i(col, row)
+
+func _cube_round(c: Vector3) -> Vector3:
+	var rx : float = round(c.x)
+	var ry : float = round(c.y)
+	var rz : float = round(c.z)
+	var dx : float = abs(rx - c.x)
+	var dy : float = abs(ry - c.y)
+	var dz : float = abs(rz - c.z)
+	if dx > dy and dx > dz:
+		rx = -ry - rz
+	elif dy > dz:
+		ry = -rx - rz
+	else:
+		rz = -rx - ry
+	return Vector3(rx, ry, rz)
+
+# Line-of-sight: từ (c1,r1) đến (c2,r2) — chỉ column chặn.
+# Bỏ qua start và end. Fire pits + entities không chặn (entity sẽ hấp thụ projectile
+# ở target, còn enemies trên đường đi không chặn nhau).
+func _has_line_of_sight(c1: int, r1: int, c2: int, r2: int) -> bool:
+	var path : Array = _hex_line(c1, r1, c2, r2)
+	for i in range(1, path.size() - 1):
+		var hex : Vector2i = path[i]
+		if hex in column_tiles:
+			return false
+	return true
 
 func _get_neighbors(col: int, row: int) -> Array:
 	var dirs = [[1,0],[-1,0],[0,-1],[0,1],[1,-1],[-1,-1]] if col % 2 == 0 \
@@ -240,8 +304,15 @@ func _refresh_hud() -> void:
 			hud.update_enemy_hp(e.get_instance_id(), e.hp, e.max_hp)
 
 func _on_hud_end_turn() -> void:
-	if phase == Phase.PLAYER_TURN:
-		_end_player_turn()
+	if phase != Phase.PLAYER_TURN: return
+	if players.is_empty(): return
+	# Nút END TURN của HUD: kết thúc turn cho CẢ 2 player luôn, dù còn dư action.
+	# (Phím D giữ behavior cũ: end current player, rotate sang next.)
+	players_turned_this_round = []
+	for i in range(players.size()):
+		if players[i].hp > 0:
+			players_turned_this_round.append(i)
+	_start_enemy_turn()
 
 func _on_hud_undo() -> void:
 	if phase == Phase.PLAYER_TURN:
@@ -294,22 +365,36 @@ func _refresh_tile_colors() -> void:
 	for v in valid_moves:
 		valid_set[v] = true
 
+	var attack_set : Dictionary = {}
+	for a in valid_attack_targets:
+		attack_set[a] = true
+
 	var cur_pos : Vector2i = Vector2i(-1, -1)
 	if not players.is_empty():
 		cur_pos = player_positions[current_player_index]
 
+	# Highlight rule (theo yêu cầu user):
+	#  ► Hover chỉ light-up nếu ô đó nằm trong valid_moves (xanh) hoặc là enemy có
+	#    thể đánh (Sonny kề bên / Mike LOS clear).
+	#  ► Hover trên ô không có gì (không movable, không enemy attackable) → KHÔNG light up.
 	for key in tiles:
 		var tile = tiles[key]
 		if key in column_tiles or key in fire_pit_tiles:
 			tile.set_state("normal")   # column/firepit tự giữ màu danh tính
 		elif key in enemy_pos:
-			tile.set_state("enemy")
+			# Hover lên enemy attackable → đỏ chói; không thì giữ enemy mặc định.
+			if key == hover_hex and key in attack_set:
+				tile.set_state("attack")
+			else:
+				tile.set_state("enemy")
 		elif key == cur_pos:
 			tile.set_state("selected")
 		elif key in valid_set:
-			tile.set_state("valid")
-		elif key == hover_hex:
-			tile.set_state("hover")
+			# Movable: hover → "hover" (sáng), không thì giữ "valid" (xanh).
+			if key == hover_hex:
+				tile.set_state("hover")
+			else:
+				tile.set_state("valid")
 		else:
 			tile.set_state("normal")
 
@@ -372,17 +457,18 @@ func _spawn_enemy(type_key: String, col: int, row: int) -> Node:
 
 func _update_valid_moves() -> void:
 	valid_moves = []
+	valid_attack_targets = []   # luôn clear cùng để visual highlight đồng bộ
 	if players.is_empty(): return
 	if not players[current_player_index].can_act(): return   # hết action → không hiện ô xanh
 
-	# Tile bị chặn = column + enemy + player khác
+	# Tile bị chặn = column + enemy + player khác (còn sống)
 	var blocked : Dictionary = {}
 	for key in column_tiles:
 		blocked[key] = true
 	for e in enemies:
 		blocked[Vector2i(e.grid_col, e.grid_row)] = true
 	for i in range(players.size()):
-		if i != current_player_index:
+		if i != current_player_index and players[i].hp > 0:
 			blocked[player_positions[i]] = true
 
 	# BFS từ vị trí current player, giới hạn `move_range` bước
@@ -402,6 +488,34 @@ func _update_valid_moves() -> void:
 			valid_moves.append(nb)
 			if steps + 1 < max_range:
 				frontier.append([nb, steps + 1])
+	_update_valid_attack_targets()
+
+# Enemy có thể tấn công:
+#   - Sonny: chỉ đánh kề bên (range=1)
+#   - Mike (uses_draw_shot): line-of-sight clear (column chặn). Mốc 8 sẽ thay
+#     bằng draw shot có bounce; tạm Mốc 6 chỉ check straight-line không column.
+# Gọi tự động ở cuối _update_valid_moves().
+func _update_valid_attack_targets() -> void:
+	valid_attack_targets = []
+	if players.is_empty(): return
+	var current = players[current_player_index]
+	if not current.can_act(): return
+	var pos : Vector2i = player_positions[current_player_index]
+	for e in enemies:
+		if _can_attack_target(pos.x, pos.y, e.grid_col, e.grid_row):
+			valid_attack_targets.append(Vector2i(e.grid_col, e.grid_row))
+
+# Có đánh được không? Dùng cho cả valid_attack_targets và click time check.
+func _can_attack_target(from_col: int, from_row: int, to_col: int, to_row: int) -> bool:
+	if players.is_empty(): return false
+	var current = players[current_player_index]
+	var d : int = _hex_dist(from_col, from_row, to_col, to_row)
+	if d <= 0: return false
+	if current.uses_draw_shot:
+		# Mike: bất kỳ range với LOS clear (column chặn)
+		return _has_line_of_sight(from_col, from_row, to_col, to_row)
+	# Sonny: chỉ kề bên
+	return d == 1
 
 func _move_entity_smooth(entity: Node, target_col: int, target_row: int) -> void:
 	var target_pos := entity_position(target_col, target_row)
@@ -425,6 +539,226 @@ func _move_player(dest: Vector2i) -> void:
 	_refresh_hud()
 
 # ═══════════════════════════════════════════════════════════
+#  COMBAT — PLAYER ATTACK (Mốc 6.1: melee cơ bản, chưa có minigame)
+# ═══════════════════════════════════════════════════════════
+
+# Player tấn công melee enemy kề bên: damage = q_dmg của weapon hiện tại.
+# Mốc 7 sẽ thay attack của Sonny bằng charge_bar minigame; Mốc 8 sẽ thay
+# Mike bằng draw_shot ranged. Hiện cả hai dùng melee cơ bản range=1.
+func _player_attack_enemy(enemy: Node) -> void:
+	var current_player = players[current_player_index]
+	if not current_player.can_act(): return
+	var dmg : int = current_player.get_q_dmg()
+	enemy.take_damage(dmg)
+	current_player.use_action()
+	current_player.has_attacked = true
+	attack_committed_this_round = true
+	if enemy.hp <= 0:
+		_kill_enemy(enemy)
+	else:
+		if hud != null:
+			hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+	_check_floor_clear()
+
+func _kill_enemy(enemy: Node) -> void:
+	if hud != null:
+		hud.remove_enemy(enemy.get_instance_id())
+	enemies.erase(enemy)
+	enemy.queue_free()
+
+# Khi hết enemies → floor clear. Mốc 9 sẽ wire vào world_map transition.
+func _check_floor_clear() -> void:
+	if enemies.is_empty():
+		print("[FLOOR CLEAR] All enemies defeated. (TODO Mốc 9: world map transition)")
+
+# ═══════════════════════════════════════════════════════════
+#  ENEMY TURN (Mốc 6.2)
+#  ► Sau khi cả 2 player end turn → enemy AI tuần tự.
+#  ► Mỗi enemy: tick_turn → plan_action mỗi action_per_turn lượt:
+#      "attack"     → spawn DodgeBar (melee) hoặc tự apply damage (ranged stub)
+#      "move"       → di chuyển 1 ô về phía player gần nhất
+#      "move_away"  → ngược lại (RANGER khi quá gần)
+#      "idle"       → bỏ qua (DUMMY)
+#  ► ACTION_DELAY giữa các action liên tiếp.
+#  ► Hết queue → reset player turn round mới.
+# ═══════════════════════════════════════════════════════════
+
+func _start_enemy_turn() -> void:
+	phase = Phase.ENEMY_TURN
+	valid_moves = []
+	valid_attack_targets = []
+	_refresh_tile_colors()
+	_refresh_debug()
+	_run_enemy_turn()
+
+func _run_enemy_turn() -> void:
+	# Iterate trên copy để xoá enemy giữa chừng (do player counter-attack…) không vỡ
+	for enemy in enemies.duplicate():
+		if not is_instance_valid(enemy): continue
+		if enemy.hp <= 0: continue
+		if _all_players_dead(): break
+		await _run_enemy_actions(enemy)
+		await get_tree().create_timer(ACTION_DELAY * 0.4).timeout
+
+	if _all_players_dead():
+		phase = Phase.DEAD
+		_refresh_debug()
+		return
+
+	# Reset cho round player mới
+	for p in players:
+		if p.hp > 0:
+			p.reset_turn()
+	players_turned_this_round = []
+	# Chọn player còn sống đầu tiên
+	current_player_index = 0
+	for i in range(players.size()):
+		if players[i].hp > 0:
+			current_player_index = i
+			break
+	phase = Phase.PLAYER_TURN
+	_save_turn_snapshot()
+	_update_valid_moves()
+	_refresh_tile_colors()
+	_refresh_debug()
+	_refresh_hud()
+
+func _run_enemy_actions(enemy: Node) -> void:
+	enemy.tick_turn()
+	enemy.has_attacked_this_turn = false
+	for i in range(enemy.actions_per_turn):
+		if enemy.hp <= 0: return
+		if _all_players_dead(): return
+		var target_idx : int = _find_nearest_player_to(enemy)
+		if target_idx < 0: return
+		var p = players[target_idx]
+		var action : String = enemy.plan_action(
+			p.grid_col, p.grid_row, GRID_COLS, GRID_ROWS)
+		match action:
+			"attack":
+				await _enemy_perform_attack(enemy, target_idx)
+				await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+			"move":
+				_enemy_move_toward(enemy, target_idx)
+				await get_tree().create_timer(ACTION_DELAY).timeout
+			"move_away":
+				_enemy_move_away(enemy, target_idx)
+				await get_tree().create_timer(ACTION_DELAY).timeout
+			"idle":
+				return
+
+func _enemy_move_toward(enemy: Node, target_idx: int) -> void:
+	var p = players[target_idx]
+	var occupied : Dictionary = _build_occupied(enemy)
+	var dest : Vector2i = enemy.best_move_toward(p.grid_col, p.grid_row, occupied, self)
+	if dest.x < 0: return
+	enemy.grid_col = dest.x
+	enemy.grid_row = dest.y
+	_move_entity_smooth(enemy, dest.x, dest.y)
+	_update_valid_moves()
+	_refresh_tile_colors()
+
+func _enemy_move_away(enemy: Node, target_idx: int) -> void:
+	var p = players[target_idx]
+	var occupied : Dictionary = _build_occupied(enemy)
+	var dest : Vector2i = enemy.best_move_away(p.grid_col, p.grid_row, occupied, self)
+	if dest.x < 0: return
+	enemy.grid_col = dest.x
+	enemy.grid_row = dest.y
+	_move_entity_smooth(enemy, dest.x, dest.y)
+	_update_valid_moves()
+	_refresh_tile_colors()
+
+func _build_occupied(exclude_enemy: Node) -> Dictionary:
+	var occupied : Dictionary = {}
+	for e in enemies:
+		if e == exclude_enemy: continue
+		occupied[Vector2i(e.grid_col, e.grid_row)] = true
+	for i in range(players.size()):
+		if players[i].hp > 0:
+			occupied[player_positions[i]] = true
+	return occupied
+
+func _enemy_perform_attack(enemy: Node, target_idx: int) -> void:
+	var attack : Dictionary = enemy.get_current_attack()
+	if attack.is_empty(): return
+	var atk_range : int = int(attack.get("range", 1))
+	var p = players[target_idx]
+	if atk_range == 1:
+		# Melee → DodgeBar (Mốc 6.3)
+		await _trigger_dodge_bar(enemy, target_idx, attack)
+	else:
+		# Ranged → projectile sẽ làm ở Mốc 8. Tạm: damage thẳng trừ 50%.
+		var dmg : int = int(attack.get("damage", 1))
+		_apply_damage_to_player(target_idx, dmg, "hit")
+	enemy.advance_attack()
+
+func _trigger_dodge_bar(enemy: Node, target_idx: int, attack: Dictionary) -> void:
+	phase = Phase.DODGE_PHASE
+	var bar = DodgeBarScene.instantiate()
+	# Note: enemy preset có "perfect_window"/"ok_window" là TIME windows (sec),
+	# không phải bar-fractions. 2D version cũng không truyền cho dodge_bar →
+	# dùng defaults ZONE_PERFECT=0.04 (4% bar half-width) / ZONE_DODGE=0.08
+	# (8%) cho zone size hợp lý.
+	bar.setup(enemy.dodge_line, 1.0)
+	# Attach vào camera với local transform → bar luôn ở trước mặt người chơi.
+	# Z=-1.2 (gần), Y=-0.18 (chỉ dưới center). Bar sau scale 0.2 + tilt 25°
+	# hiện ~20% bề rộng view.
+	camera.add_child(bar)
+	bar.position = Vector3(0.0, -0.18, -1.2)
+	var result : String = await bar.bar_finished
+	var dmg : int = int(attack.get("damage", 1))
+	_apply_damage_to_player(target_idx, dmg, result)
+	phase = Phase.ENEMY_TURN
+
+func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") -> void:
+	if target_idx < 0 or target_idx >= players.size(): return
+	var p = players[target_idx]
+	match result:
+		"perfect", "dodged":
+			p.perfection = mini(p.perfection + 1, p.perfection_cap)
+			# Không trừ HP
+		_:  # "hit" hoặc bất cứ gì khác
+			p.take_damage(dmg)
+			if p.hp <= 0:
+				p.visible = false   # ẩn capsule khi chết (Mốc 6.4 polish)
+	# HUD update
+	if hud != null:
+		hud.set_hp(player_names[target_idx], p.hp, p.max_hp)
+		# HYPE bar dùng perfection của player đang active
+		if current_player_index < players.size():
+			var cur = players[current_player_index]
+			hud.set_hype_from_perfection(cur.perfection, cur.perfection_cap)
+
+func _find_nearest_player_to(enemy: Node) -> int:
+	var best_idx : int = -1
+	var best_d   : int = 999
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		var d : int = _hex_dist(enemy.grid_col, enemy.grid_row,
+								players[i].grid_col, players[i].grid_row)
+		if d < best_d:
+			best_d   = d
+			best_idx = i
+	return best_idx
+
+func _all_players_dead() -> bool:
+	for p in players:
+		if p.hp > 0: return false
+	return true
+
+# ═══════════════════════════════════════════════════════════
+#  RESTART (Mốc 6.4)
+# ═══════════════════════════════════════════════════════════
+
+func _restart_game() -> void:
+	get_tree().reload_current_scene()
+
+# ═══════════════════════════════════════════════════════════
 #  TURN FLOW (Mốc 4 — chưa có enemy turn thật)
 # ═══════════════════════════════════════════════════════════
 
@@ -441,20 +775,17 @@ func _switch_player_to_other() -> void:
 func _end_player_turn() -> void:
 	if current_player_index not in players_turned_this_round:
 		players_turned_this_round.append(current_player_index)
-	# Tìm player tiếp theo chưa end turn
+	# Tìm player tiếp theo chưa end turn (và còn sống)
 	var next_idx : int = -1
 	for i in range(1, players.size() + 1):
 		var idx = (current_player_index + i) % players.size()
-		if idx not in players_turned_this_round:
+		if idx not in players_turned_this_round and players[idx].hp > 0:
 			next_idx = idx
 			break
 	if next_idx == -1:
-		# Tất cả đã hết lượt → reset round (tạm bỏ qua enemy turn cho đến Mốc 6)
-		players_turned_this_round = []
-		for p in players:
-			p.reset_turn()
-		current_player_index = 0
-		_save_turn_snapshot()
+		# Tất cả đã hết lượt → enemy turn (Mốc 6.2)
+		_start_enemy_turn()
+		return
 	else:
 		current_player_index = next_idx
 	_update_valid_moves()
@@ -570,10 +901,60 @@ func mouse_to_ground(mouse_pos: Vector2) -> Vector3:
 	return origin + normal * t
 
 func mouse_to_hex(mouse_pos: Vector2) -> Vector2i:
+	# Pass 1: Capsule-aware picking — nếu ray đi qua capsule của entity nào,
+	# trả về hex của entity đó (tránh bug ray xuyên capsule rồi hit ground sau lưng).
+	var origin : Vector3 = camera.project_ray_origin(mouse_pos)
+	var normal : Vector3 = camera.project_ray_normal(mouse_pos)
+	var entity_hex : Vector2i = _pick_entity_hex(origin, normal)
+	if entity_hex.x >= 0:
+		return entity_hex
+	# Pass 2: standard ray-plane intersection at GROUND_Y
 	var hit : Vector3 = mouse_to_ground(mouse_pos)
 	if is_nan(hit.x):
 		return Vector2i(-1, -1)
 	return world_to_hex(hit)
+
+# Tìm entity (enemy hoặc player) có capsule gần ray nhất.
+# Capsule = trụ đứng tại (entity.x, *, entity.z), bán kính PICK_RADIUS.
+# Trả Vector2i(grid_col, grid_row) hoặc (-1,-1) nếu không có entity nào trong tầm.
+func _pick_entity_hex(origin: Vector3, dir: Vector3) -> Vector2i:
+	const PICK_RADIUS : float = 0.45   # bán kính trục capsule (hơi nhỏ hơn HEX_SIZE/2)
+	const PICK_Y_MIN  : float = -0.10   # ray phải đi qua dải Y này (capsule bottom)
+	const PICK_Y_MAX  : float = 2.20    # đến top capsule
+	var best   : Vector2i = Vector2i(-1, -1)
+	var best_t : float    = INF
+
+	var dxz2 : float = dir.x * dir.x + dir.z * dir.z
+	if dxz2 < 0.0001:
+		return best   # ray thẳng đứng → không pick được capsule
+
+	# Gom alive entities
+	var entities : Array = []
+	for e in enemies:
+		if is_instance_valid(e) and e.hp > 0:
+			entities.append(e)
+	for p in players:
+		if p.hp > 0:
+			entities.append(p)
+
+	for ent in entities:
+		var ep : Vector3 = entity_position(ent.grid_col, ent.grid_row)
+		# t (parameter trong ray gốc) tại điểm gần trục capsule nhất.
+		# Capsule là trục đứng → khoảng cách 3D = khoảng cách XZ.
+		var t : float = ((ep.x - origin.x) * dir.x + (ep.z - origin.z) * dir.z) / dxz2
+		if t < 0.0: continue   # entity sau lưng camera
+		var cx : float = origin.x + t * dir.x
+		var cz : float = origin.z + t * dir.z
+		var d2 : float = (cx - ep.x) * (cx - ep.x) + (cz - ep.z) * (cz - ep.z)
+		if d2 > PICK_RADIUS * PICK_RADIUS: continue
+		# 3D verify: Y của ray tại t phải nằm trong capsule volume
+		# → tránh false-positive khi 2D shadow trùng nhưng ray bay vượt đầu/dưới chân capsule.
+		var cy : float = origin.y + t * dir.y
+		if cy < PICK_Y_MIN or cy > PICK_Y_MAX: continue
+		if t < best_t:
+			best_t = t
+			best   = Vector2i(ent.grid_col, ent.grid_row)
+	return best
 
 # ═══════════════════════════════════════════════════════════
 #  INPUT
@@ -615,6 +996,9 @@ func _input(event: InputEvent) -> void:
 			KEY_K:
 				if phase == Phase.PLAYER_TURN:
 					_reset_turn()
+			KEY_ENTER, KEY_KP_ENTER:
+				if phase == Phase.DEAD:
+					_restart_game()
 
 	# ── Cuộn chuột → zoom (lên = zoom in, xuống = zoom out) ──
 	if event is InputEventMouseButton and event.pressed:
@@ -651,18 +1035,39 @@ func _input(event: InputEvent) -> void:
 			and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if phase == Phase.PLAYER_TURN:
 			var hex : Vector2i = mouse_to_hex(event.position)
-			if hex in valid_moves:
-				_move_player(hex)
+			if hex.x >= 0 and not players.is_empty():
+				var target_enemy : Node = _get_enemy_at(hex)
+				var current_player          = players[current_player_index]
+				# Click vào enemy + còn action + đánh được → attack
+				# (Sonny: kề bên, Mike: LOS clear). Check nhất quán với
+				# valid_attack_targets qua _can_attack_target.
+				if target_enemy != null and current_player.can_act() \
+						and _can_attack_target(current_player.grid_col,
+							current_player.grid_row, hex.x, hex.y):
+					_player_attack_enemy(target_enemy)
+					return
+				if hex in valid_moves:
+					_move_player(hex)
 
 func _refresh_debug() -> void:
 	if not debug_label: return
+	if phase == Phase.DEAD:
+		debug_label.text = "[DEAD] All heroes fallen. Press ENTER to restart."
+		return
 	if players.is_empty():
 		debug_label.text = "pitch %.0f° yaw %.0f° dist %.0f  hover=%s" \
 			% [camera_pitch_deg, camera_yaw_deg, camera_distance, str(hover_hex)]
 		return
 	var cur = players[current_player_index]
-	debug_label.text = "[%s] HP %d/%d  Actions %d/%d   |   LMB=move  Tab=switch  D=end  U=undo  K=reset   |   pitch %.0f° dist %.0f" \
+	var phase_str : String
+	match phase:
+		Phase.PLAYER_TURN: phase_str = "PLAYER"
+		Phase.ENEMY_TURN:  phase_str = "ENEMY"
+		Phase.DODGE_PHASE: phase_str = "DODGE!"
+		_:                 phase_str = "?"
+	debug_label.text = "[%s] %s HP %d/%d  Act %d/%d   |   LMB=attack/move  Tab=switch  D=end  U=undo  K=reset  SPACE=dodge   |   pitch %.0f° dist %.0f" \
 		% [
+			phase_str,
 			player_names[current_player_index],
 			cur.hp, cur.max_hp,
 			cur.actions_left, cur.actions_per_turn,
