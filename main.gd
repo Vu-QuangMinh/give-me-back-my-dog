@@ -610,6 +610,19 @@ func _face_all_players_to_enemies() -> void:
 	for i in range(players.size()):
 		_face_player_to_nearest_enemy(i)
 
+# Quay player về một vị trí world XZ cụ thể (target attack hiện tại). Dùng
+# trước khi play_attack để animation đánh hướng đúng vào địch đang đánh.
+func _face_player_to_position(p: Node, target_pos: Vector3) -> void:
+	if p == null or not is_instance_valid(p): return
+	var p_pos : Vector3 = p.position
+	if absf(target_pos.x - p_pos.x) < 0.001 \
+			and absf(target_pos.z - p_pos.z) < 0.001:
+		return
+	# look_at quay -Z local sang điểm target. Models .glb từ Mixamo/Blender
+	# face +Z, nên xoay 180° quanh Y bù lại (cùng cơ chế _face_to_nearest_enemy).
+	p.look_at(Vector3(target_pos.x, p_pos.y, target_pos.z), Vector3.UP)
+	p.rotate_object_local(Vector3.UP, PI)
+
 func _spawn_players() -> void:
 	for preset_name in PlayerScript.PLAYER_ORDER:
 		var p = PlayerScenes[preset_name].instantiate()
@@ -853,6 +866,7 @@ func _on_charge_resolved(result: String, target_enemy: Node) -> void:
 		"normal":  dmg = base_dmg
 		"miss":    dmg = 0
 	if dmg > 0:
+		_face_player_to_position(current_player, target_enemy.position)
 		if current_player.has_method("play_attack"):
 			current_player.play_attack()
 		target_enemy.take_damage(dmg)
@@ -981,6 +995,7 @@ func _on_mike_timing_resolved(result: String, target_pos: Vector3) -> void:
 	current.has_attacked = true
 	attack_committed_this_round = true
 	if dmg > 0:
+		_face_player_to_position(current, target_pos)
 		if current.has_method("play_attack"):
 			current.play_attack()
 		# Fire bouncing projectile theo direction đã lock (free Vector3 target).
@@ -1288,6 +1303,7 @@ func _explode_bomb(bomb: Node) -> void:
 func _player_attack_enemy(enemy: Node) -> void:
 	var current_player = players[current_player_index]
 	if not current_player.can_act(): return
+	_face_player_to_position(current_player, enemy.position)
 	if current_player.has_method("play_attack"):
 		current_player.play_attack()
 	var dmg : int = current_player.get_q_dmg()
@@ -1417,9 +1433,9 @@ func _trigger_modal_callback() -> void:
 func _spawn_damage_popup(world_pos: Vector3, text: String, color: Color) -> void:
 	var label := Label3D.new()
 	label.text             = text
-	label.font_size        = 96
-	label.pixel_size       = 0.006
-	label.outline_size     = 12
+	label.font_size        = 64
+	label.pixel_size       = 0.003   # was 0.006 → 50% smaller text
+	label.outline_size     = 8
 	label.outline_modulate = Color(0, 0, 0, 0.95)
 	label.modulate         = color
 	label.no_depth_test    = true

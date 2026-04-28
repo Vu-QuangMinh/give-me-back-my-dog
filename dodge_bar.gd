@@ -151,8 +151,8 @@ func _build_geometry() -> void:
 	hint_label = Label3D.new()
 	hint_label.text                = "SPACE to Dodge!"
 	hint_label.font_size           = 48
-	hint_label.pixel_size          = 0.0020
-	hint_label.outline_size        = 6
+	hint_label.pixel_size          = 0.0010
+	hint_label.outline_size        = 4
 	hint_label.outline_modulate    = Color(0, 0, 0, 0.9)
 	hint_label.modulate            = Color(1.0, 0.95, 0.55)
 	hint_label.position            = Vector3(0, 0.07, 0)
@@ -164,8 +164,8 @@ func _build_geometry() -> void:
 	result_label = Label3D.new()
 	result_label.text                = ""
 	result_label.font_size           = 64
-	result_label.pixel_size          = 0.0024
-	result_label.outline_size        = 8
+	result_label.pixel_size          = 0.0012
+	result_label.outline_size        = 5
 	result_label.outline_modulate    = Color(0, 0, 0, 0.95)
 	result_label.position            = Vector3(0, 0.13, 0)
 	result_label.no_depth_test       = true
