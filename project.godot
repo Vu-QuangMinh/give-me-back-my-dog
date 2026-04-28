@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Give me back my dog"
-run/main_scene="uid://dteyaoqnjvn6y"
+run/main_scene="res://pixelate_root.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
