@@ -29,6 +29,14 @@ const PlayerScenes  : Dictionary = {
 const EnemyScript   = preload("res://enemy.gd")
 const EnemyScene    = preload("res://enemy.tscn")
 
+# Map decorations — .glb scene preload theo key (FLOOR_SCENARIOS.decorations
+# tham chiếu bằng key string). .glb cần được Godot import (mở editor 1 lần).
+const DECO_SCENES : Dictionary = {
+	"house": preload("res://Map/autumn_house.glb"),
+	"grass": preload("res://Map/grass.glb"),
+	"fire":  preload("res://campfire.tscn"),
+}
+
 # ─── Hex grid ────────────────────────────────────────────────
 const HEX_SIZE     : float = 1.0
 const GRID_COLS    : int   = 12
@@ -65,6 +73,13 @@ const FLOOR_SCENARIOS : Array = [
 		"name":    "Floor 1",
 		"is_boss": false,
 		"columns": [],
+		"decorations": [
+			# House + campfire đặt ở CẠNH bắc của map (z < -7), scale nhỏ
+			# (house 30%) để vừa khung view nhưng không lấp grid gameplay.
+			{ "scene": "house", "pos": Vector3(-1.5, 0, -9.5), "scale": 0.30, "rot_y_deg": 270.0 },
+			{ "scene": "fire",  "pos": Vector3( 2.0, 0, -6.0), "scale": 2.0,  "rot_y_deg":   0.0 },
+		],
+		"grass_scatter_pct": 50,   # spawn grass.glb trên 50% hex tiles NORMAL
 		"enemies": [
 			{ "type": "grunt", "col": 7, "row": 2 },
 			{ "type": "grunt", "col": 8, "row": 5 },
@@ -346,6 +361,8 @@ func _ready() -> void:
 	camera_anchor = Vector3.ZERO
 	_build_grid()
 	_setup_demo_columns()   # Mốc 9.1: load từ FLOOR_SCENARIOS[current_floor]
+	_setup_decorations()    # Mốc 9.1: load .glb decorations (cây, etc.)
+	_setup_coord_grid()     # Debug overlay (F4 toggle)
 	_spawn_players()
 	_spawn_enemies()
 	_face_all_players_to_enemies()
@@ -445,7 +462,10 @@ func _on_hud_backpack() -> void:
 	print("[HUD] Backpack pressed (stub)")
 
 func _on_viewport_resized() -> void:
-	var size : Vector2 = get_viewport().get_visible_rect().size
+	# Dùng kích thước OS window thay vì viewport size — khi pixelate_root
+	# wrap main.tscn vào SubViewport (vd 480×270), camera zoom phải tính
+	# theo screen thật (1920×1080) chứ không phải SubViewport low-res.
+	var size : Vector2 = Vector2(get_window().size)
 	var sx : float = size.x / REF_WIDTH
 	var sy : float = size.y / REF_HEIGHT
 	# Lấy min để cả 2 chiều của reference vẫn fit (không bị crop quá)
@@ -475,6 +495,200 @@ func _setup_demo_columns() -> void:
 		if tiles.has(cr):
 			tiles[cr].setup(cr.x, cr.y, HexTileScript.Type.COLUMN)
 			column_tiles[cr] = true
+
+var _coord_grid : Node3D = null
+
+func _setup_coord_grid() -> void:
+	# Spawn lưới tọa độ debug — mặc định ON. F4 toggle.
+	var grid_script = load("res://coord_grid.gd")
+	_coord_grid = Node3D.new()
+	_coord_grid.set_script(grid_script)
+	_coord_grid.name = "CoordGrid"
+	add_child(_coord_grid)
+
+func _setup_decorations() -> void:
+	# Instance .glb scenes (cỏ, nhà, etc.) ở vị trí world cố định.
+	# Decorations chỉ trang trí, không tham gia gameplay (không block, không LOS).
+	_ensure_deco_holder()
+	var scenario : Dictionary = _current_scenario()
+	var decos : Array = scenario.get("decorations", [])
+	for d in decos:
+		var key : String = d.get("scene", "")
+		if not DECO_SCENES.has(key): continue
+		# Campfire build mesh+particles trong _ready → KHÔNG duplicate được
+		# (sẽ build 2 lần, particles bị reset). Instantiate fresh.
+		# .glb (house/grass) thì cache prefab + duplicate (share resources).
+		var inst : Node3D
+		var s : float = d.get("scale", 1.0)
+		if key == "fire":
+			inst = DECO_SCENES[key].instantiate() as Node3D
+			# Particles dùng world coords → Node3D.scale KHÔNG ảnh hưởng size
+			# emit/quad/light. Pass scale từ scenario sang fire_size_mult
+			# (đã handle multiply lên mọi param trong campfire.gd).
+			if inst:
+				inst.set("fire_size_mult", s)
+			s = 1.0   # đừng apply Node3D scale nữa, tránh double-scale logs/ember
+		else:
+			var prefab : Node3D = _get_deco_prefab(key)
+			if prefab == null: continue
+			inst = prefab.duplicate() as Node3D
+		if inst == null: continue
+		inst.visible = true
+		inst.position = d.get("pos", Vector3.ZERO)
+		inst.scale = Vector3(s, s, s)
+		inst.rotation_degrees = Vector3(0, d.get("rot_y_deg", 0.0), 0)
+		add_child(inst)
+		print("[deco] %s spawned at %s" % [key, str(inst.position)])
+		if key == "house":
+			_try_ignite_house_car(inst)
+	# Grass scatter — spawn grass.glb trên N% hex tiles NORMAL (mỗi tile 1 cụm).
+	var pct : int = int(scenario.get("grass_scatter_pct", 0))
+	if pct > 0:
+		_scatter_grass(pct)
+
+# ─── Grass scatter ──────────────────────────────────────────
+# Vừa fit hex tile (HEX_SIZE=1.0). Lod_bias thấp + visibility range
+# giảm cost render khi nhiều cụm trên màn hình.
+const GRASS_LOD_BIAS         : float = 0.25
+const GRASS_VIS_RANGE_END    : float = 30.0
+const GRASS_VIS_RANGE_MARGIN : float = 6.0
+const GRASS_HEX_FIT_RATIO    : float = 0.85   # 85% đường kính hex
+
+func _scatter_grass(pct: int) -> void:
+	var prefab : Node3D = _get_deco_prefab("grass")
+	if prefab == null: return
+	var bbox : AABB = _measure_combined_aabb(prefab)
+	var max_dim : float = maxf(bbox.size.x, bbox.size.z)
+	if max_dim < 0.001:
+		print("[grass] AABB invalid — skip scatter")
+		return
+	# Scale cụm cỏ vừa fit hex (đường kính hex ≈ 2*HEX_SIZE).
+	var fit_scale : float = (HEX_SIZE * 2.0 * GRASS_HEX_FIT_RATIO) / max_dim
+	var spawned : int = 0
+	for key in tiles.keys():
+		var tile = tiles[key]
+		if tile.tile_type != HexTileScript.Type.NORMAL: continue
+		if randf() * 100.0 > pct: continue
+		var inst : Node3D = prefab.duplicate() as Node3D
+		if inst == null: continue
+		inst.visible = true
+		var p : Vector3 = hex_to_world(int(key.x), int(key.y))
+		p.y = GROUND_Y   # mặt trên hex tile (= HexTile.TILE_HEIGHT)
+		inst.position = p
+		inst.scale = Vector3(fit_scale, fit_scale, fit_scale)
+		inst.rotation_degrees = Vector3(0, randf() * 360.0, 0)
+		_apply_grass_runtime_opts(inst)
+		add_child(inst)
+		spawned += 1
+	print("[grass] scattered %d clumps (pct=%d, fit_scale=%.3f)" % [spawned, pct, fit_scale])
+
+# Recursive: gather AABB của tất cả MeshInstance3D children, merge thành 1 AABB
+# tổng. Prefab phải đã trong scene tree → global_transform chính xác.
+func _measure_combined_aabb(root: Node) -> AABB:
+	var collected : Array = []
+	_collect_mesh_aabbs(root, collected)
+	if collected.is_empty(): return AABB()
+	var combined : AABB = collected[0]
+	for i in range(1, collected.size()):
+		combined = combined.merge(collected[i])
+	return combined
+
+func _collect_mesh_aabbs(node: Node, out: Array) -> void:
+	if node is MeshInstance3D:
+		var mi : MeshInstance3D = node
+		out.append(mi.global_transform * mi.get_aabb())
+	for c in node.get_children():
+		_collect_mesh_aabbs(c, out)
+
+# ─── Car ignition ───────────────────────────────────────────
+# Scan node names trong autumn_house tìm node giống "ô tô".
+# Match case-insensitive với keyword phổ biến. Nếu không thấy → in cây
+# node ra console để user kiểm tra.
+const CAR_KEYWORDS : Array = [
+	"car", "auto", "sedan", "suv", "truck", "vehicle",
+]
+
+func _try_ignite_house_car(house: Node3D) -> void:
+	var car : Node3D = _find_node_by_keywords(house, CAR_KEYWORDS)
+	if car == null:
+		print("[fire/car] không tìm thấy node ô tô — cây node của house:")
+		_print_subtree(house, 0)
+		return
+	# Đo AABB world-space của car và mọi mesh con bên trong.
+	var aabb : AABB = _measure_combined_aabb(car)
+	var max_dim : float = maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+	if max_dim < 0.001:
+		print("[fire/car] tìm thấy '%s' nhưng AABB rỗng" % car.name)
+		return
+	var center : Vector3 = aabb.position + aabb.size * 0.5
+	# Spawn Campfire ở tâm car, scale theo dimensions car để bao trùm.
+	var fire : Node3D = DECO_SCENES["fire"].instantiate() as Node3D
+	if fire == null: return
+	fire.position = center
+	# fire_size_mult ≈ kích thước lớn nhất của car → flames spread bao trùm.
+	fire.set("fire_size_mult", max_dim * 1.1)
+	fire.set("black_smoke",    true)
+	fire.set("no_logs",        true)
+	add_child(fire)
+	print("[fire/car] đốt '%s' tại %s, max_dim=%.2f, mult=%.2f" \
+			% [car.name, str(center), max_dim, max_dim * 1.1])
+
+func _find_node_by_keywords(root: Node, keywords: Array) -> Node3D:
+	var stack : Array = [root]
+	while not stack.is_empty():
+		var n : Node = stack.pop_back()
+		if n is Node3D:
+			var nm : String = String(n.name).to_lower()
+			for kw in keywords:
+				if kw in nm:
+					return n
+		for c in n.get_children():
+			stack.append(c)
+	return null
+
+func _print_subtree(node: Node, depth: int) -> void:
+	var indent : String = "  ".repeat(depth)
+	print("%s%s [%s]" % [indent, node.name, node.get_class()])
+	for c in node.get_children():
+		_print_subtree(c, depth + 1)
+
+# Áp dụng tối ưu lên mọi MeshInstance3D bên trong instance:
+# ► lod_bias thấp → ưu tiên LOD đơn giản hơn (hiệu lực nếu .glb có LOD
+#   được generate ở import, default Godot 4 = ON).
+# ► visibility_range_end → cull instance khi camera xa, giảm draw call.
+# Lưu ý: lod_bias chỉ giảm poly khi DISTANCE xa. Để giảm 80% poly thực sự
+# ở mọi khoảng cách, cần Blender Decimate trước khi export .glb.
+func _apply_grass_runtime_opts(node: Node) -> void:
+	if node is MeshInstance3D:
+		var mi : MeshInstance3D = node
+		mi.lod_bias                    = GRASS_LOD_BIAS
+		mi.visibility_range_end        = GRASS_VIS_RANGE_END
+		mi.visibility_range_end_margin = GRASS_VIS_RANGE_MARGIN
+	for c in node.get_children():
+		_apply_grass_runtime_opts(c)
+
+# Cache prefabs (1 cây từ forest) làm con của _deco_holder ẩn → tránh leak
+# khi scene main reload (holder free thì prefab free theo).
+var _deco_prefabs : Dictionary = {}
+var _deco_holder  : Node3D     = null
+
+func _ensure_deco_holder() -> void:
+	if _deco_holder and is_instance_valid(_deco_holder): return
+	_deco_holder = Node3D.new()
+	_deco_holder.name = "DecoPrefabHolder"
+	_deco_holder.visible = false
+	add_child(_deco_holder)
+
+func _get_deco_prefab(key: String) -> Node3D:
+	if _deco_prefabs.has(key):
+		return _deco_prefabs[key]
+	if not DECO_SCENES.has(key): return null
+	var prefab : Node3D = DECO_SCENES[key].instantiate() as Node3D
+	if prefab:
+		prefab.visible = false
+		_deco_holder.add_child(prefab)
+	_deco_prefabs[key] = prefab
+	return prefab
 
 func _current_scenario() -> Dictionary:
 	var idx : int = clampi(current_floor, 0, FLOOR_SCENARIOS.size() - 1)
@@ -1912,6 +2126,29 @@ func _pick_entity_hex(origin: Vector3, dir: Vector3) -> Vector2i:
 #  INPUT
 # ═══════════════════════════════════════════════════════════
 
+# ─── Camera pan (arrow keys) ────────────────────────────────
+# Hold UP/DOWN/LEFT/RIGHT để di chuyển camera_anchor quanh bản đồ.
+# Pan relative to camera yaw — UP = đi theo hướng camera đang nhìn,
+# LEFT/RIGHT = strafe ngang.
+const CAM_PAN_SPEED : float = 10.0   # units per second
+const CAM_PAN_BOUND : float = 25.0   # giới hạn anchor để không bay xa map
+
+func _process(delta: float) -> void:
+	var pan := Vector3.ZERO
+	if Input.is_key_pressed(KEY_UP):    pan.z -= 1.0
+	if Input.is_key_pressed(KEY_DOWN):  pan.z += 1.0
+	if Input.is_key_pressed(KEY_LEFT):  pan.x -= 1.0
+	if Input.is_key_pressed(KEY_RIGHT): pan.x += 1.0
+	if pan == Vector3.ZERO: return
+	var yaw : float = deg_to_rad(camera_yaw_deg)
+	var forward : Vector3 = -Vector3(cos(yaw), 0, sin(yaw))   # XZ forward
+	var right   : Vector3 =  Vector3(sin(yaw), 0, -cos(yaw))  # XZ right
+	var dir : Vector3 = (forward * -pan.z + right * pan.x).normalized()
+	camera_anchor += dir * CAM_PAN_SPEED * delta
+	camera_anchor.x = clampf(camera_anchor.x, -CAM_PAN_BOUND, CAM_PAN_BOUND)
+	camera_anchor.z = clampf(camera_anchor.z, -CAM_PAN_BOUND, CAM_PAN_BOUND)
+	_update_camera()
+
 func _input(event: InputEvent) -> void:
 	# ESC = cancel bomb/grapple/aim mode trước, sau đó mới quit game
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
@@ -1983,6 +2220,11 @@ func _input(event: InputEvent) -> void:
 					_trigger_modal_callback()
 				elif phase == Phase.DEAD:
 					_restart_from_floor_zero()
+			KEY_F4:
+				# Toggle lưới tọa độ debug.
+				if _coord_grid and is_instance_valid(_coord_grid):
+					_coord_grid.visible = not _coord_grid.visible
+					print("[coord_grid] visible=%s" % str(_coord_grid.visible))
 
 	# ── Cuộn chuột → zoom (lên = zoom in, xuống = zoom out) ──
 	if event is InputEventMouseButton and event.pressed:

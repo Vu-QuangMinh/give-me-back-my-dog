@@ -1,22 +1,13 @@
-[gd_scene load_steps=8 format=3 uid="uid://dteyaoqnjvn6y"]
+[gd_scene format=3 uid="uid://dteyaoqnjvn6y"]
 
-[ext_resource type="Script" path="res://main.gd" id="1_main"]
-[ext_resource type="PackedScene" path="res://hud.tscn" id="2_hud"]
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
-size = Vector2(80, 80)
-
-[sub_resource type="StandardMaterial3D" id="Mat_ground"]
-albedo_color = Color(0.06, 0.06, 0.09, 1)
-metallic_specular = 0.05
-roughness = 1.0
+[ext_resource type="Script" uid="uid://rou3v7dd3ds3" path="res://main.gd" id="1_main"]
+[ext_resource type="PackedScene" uid="uid://b8hudm0ckm0c5" path="res://hud.tscn" id="2_hud"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_mat"]
 sky_top_color = Color(0.07, 0.08, 0.13, 1)
 sky_horizon_color = Color(0.16, 0.17, 0.22, 1)
 ground_bottom_color = Color(0.04, 0.04, 0.06, 1)
-ground_horizon_color = Color(0.10, 0.11, 0.14, 1)
-sun_angle_max = 30.0
+ground_horizon_color = Color(0.1, 0.11, 0.14, 1)
 
 [sub_resource type="Sky" id="Sky_res"]
 sky_material = SubResource("Sky_mat")
@@ -25,7 +16,7 @@ sky_material = SubResource("Sky_mat")
 background_mode = 2
 sky = SubResource("Sky_res")
 ambient_light_source = 2
-ambient_light_color = Color(0.85, 0.88, 1.0, 1)
+ambient_light_color = Color(0.85, 0.88, 1, 1)
 ambient_light_energy = 0.45
 tonemap_mode = 2
 glow_enabled = true
@@ -33,38 +24,45 @@ glow_intensity = 0.4
 glow_strength = 0.9
 glow_bloom = 0.05
 
-[node name="Main" type="Node3D"]
+[sub_resource type="StandardMaterial3D" id="Mat_ground"]
+albedo_color = Color(0.06, 0.06, 0.09, 1)
+metallic_specular = 0.05
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(80, 80)
+
+[node name="Main" type="Node3D" unique_id=1319661020]
 script = ExtResource("1_main")
 
-[node name="Camera3D" type="Camera3D" parent="."]
+[node name="Camera3D" type="Camera3D" parent="." unique_id=74123848]
 fov = 45.0
 near = 0.1
 far = 200.0
 
-[node name="Sun" type="DirectionalLight3D" parent="."]
-rotation_degrees = Vector3(-55, 30, 0)
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=671898418]
+transform = Transform3D(0.8660254, -0.40957603, 0.28678823, 0, 0.57357645, 0.81915206, -0.5, -0.7094065, 0.49673176, 0, 0, 0)
 light_energy = 1.1
 shadow_enabled = true
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=919309025]
 environment = SubResource("Env_main")
 
-[node name="Ground" type="MeshInstance3D" parent="."]
-position = Vector3(0, -0.05, 0)
-mesh = SubResource("PlaneMesh_ground")
+[node name="Ground" type="MeshInstance3D" parent="." unique_id=192016986]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
 material_override = SubResource("Mat_ground")
+mesh = SubResource("PlaneMesh_ground")
 
-[node name="GameHUD" parent="." instance=ExtResource("2_hud")]
+[node name="GameHUD" parent="." unique_id=1995237547 instance=ExtResource("2_hud")]
 
-[node name="CombatLayer" type="CanvasLayer" parent="."]
+[node name="CombatLayer" type="CanvasLayer" parent="." unique_id=424697817]
 layer = 10
 
-[node name="HUD" type="CanvasLayer" parent="."]
+[node name="HUD" type="CanvasLayer" parent="." unique_id=730744718]
 
-[node name="DebugLabel" type="Label" parent="HUD"]
+[node name="DebugLabel" type="Label" parent="HUD" unique_id=757133025]
+modulate = Color(0.95, 0.92, 0.5, 1)
 offset_left = 10.0
 offset_top = 10.0
 offset_right = 800.0
 offset_bottom = 32.0
-modulate = Color(0.95, 0.92, 0.5, 1)
 text = "[ ] pitch  -/= zoom  RMB-drag = orbit  LMB = select"
