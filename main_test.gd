@@ -45,8 +45,8 @@ const SCENARIOS : Dictionary = {
 		"columns":   [Vector2i(5, 4), Vector2i(6, 2)],
 		"fire_pits": [],
 		"enemies": [
-			{ "type": "archer", "col": 9, "row": 2 },
-			{ "type": "archer", "col": 10, "row": 5 },
+			{ "type": "archer", "col": 3, "row": 2 },
+			{ "type": "archer", "col": 3, "row": 5 },
 		],
 	},
 	"assassin_test": {

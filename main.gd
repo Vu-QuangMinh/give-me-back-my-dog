@@ -1394,7 +1394,7 @@ func _fire_enemy_projectile(enemy: Node, target_idx: int, attack: Dictionary) ->
 
 # Fire Mike's caught projectiles 0.3s apart in the shot direction (background).
 func _fire_mike_caught_projectiles_async(shooter: Node, direction: Vector3) -> void:
-	var caught := shooter.caught_projectiles.duplicate()
+	var caught: Array = shooter.caught_projectiles.duplicate()
 	shooter.caught_projectiles.clear()
 	for cd in caught:
 		await get_tree().create_timer(0.30).timeout
