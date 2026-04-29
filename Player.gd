@@ -11,24 +11,42 @@ const PLAYER_ORDER : Array = ["Sonny", "Mike"]
 
 const CHARACTER_PRESETS : Dictionary = {
 	"Sonny": {
-		"max_hp":           4,
-		"equipped":         "pan",
-		"spawn_col":        0,
-		"spawn_row":        4,
-		"move_range":       2,
-		"actions_per_turn": 2,
-		"uses_draw_shot":   false,
-		"body_color":       Color(0.93, 0.55, 0.25),   # cam ấm
+		"max_hp":            4,
+		"equipped":          "pan",
+		"spawn_col":         0,
+		"spawn_row":         4,
+		"move_range":        2,
+		"actions_per_turn":  2,
+		"uses_draw_shot":    false,
+		"body_color":        Color(0.93, 0.55, 0.25),   # cam ấm
+		# ── Tuning ──────────────────────────────────────────
+		"bombs_per_floor":   1,
+		"bomb_aoe_damage":   2,
+		"grapples_per_floor": 0,
+		"proj_launch_speed": 0.0,
+		"proj_decay_rate":   0.0,
+		"proj_min_speed":    0.0,
+		"proj_neg_bounce":   0.0,
+		"caught_capacity":   0,
 	},
 	"Mike": {
-		"max_hp":           3,
-		"equipped":         "slingshot",
-		"spawn_col":        0,
-		"spawn_row":        2,
-		"move_range":       2,
-		"actions_per_turn": 2,
-		"uses_draw_shot":   true,
-		"body_color":       Color(0.30, 0.65, 0.95),   # xanh lam
+		"max_hp":            3,
+		"equipped":          "slingshot",
+		"spawn_col":         0,
+		"spawn_row":         2,
+		"move_range":        2,
+		"actions_per_turn":  2,
+		"uses_draw_shot":    true,
+		"body_color":        Color(0.30, 0.65, 0.95),   # xanh lam
+		# ── Tuning ──────────────────────────────────────────
+		"bombs_per_floor":   0,
+		"bomb_aoe_damage":   0,
+		"grapples_per_floor": 2,
+		"proj_launch_speed": 18.0,
+		"proj_decay_rate":   0.85,
+		"proj_min_speed":    0.54,
+		"proj_neg_bounce":   5.0,
+		"caught_capacity":   2,
 	},
 }
 
@@ -107,6 +125,24 @@ var actions_left  : int  = 2
 var has_attacked  : bool = false
 var disarmed      : bool = false
 var floor_cleared : bool = false
+
+# ── Per-character tuning (read from preset, never touch directly) ──
+var bombs_left         : int   = 0   # Sonny: bombs remaining this floor
+var bomb_aoe_damage    : int   = 0   # Sonny: AOE damage per bomb explosion
+var grapples_left      : int   = 0   # Mike:  grapple uses remaining this floor
+var proj_launch_speed  : float = 0.0 # Mike:  initial projectile speed
+var proj_decay_rate    : float = 0.0 # Mike:  exponential speed decay
+var proj_min_speed     : float = 0.0 # Mike:  die below this speed
+var proj_neg_bounce    : float = 0.0 # Mike:  speed penalty per bounce
+var caught_capacity    : int   = 0   # Mike:  max projectiles held at once
+
+# ── Per-turn / action-mode state (main.gd reads these instead of globals) ─
+var shot_used          : bool  = false  # Mike: one Draw Shot per round
+var aiming             : bool  = false  # Mike: aim-mode active
+var grappling          : bool  = false  # Mike: grapple-mode active
+var placing_bomb       : bool  = false  # Sonny: bomb-placement mode active
+var attack_mode        : bool  = false  # Sonny: Q target-selection mode active
+var caught_projectiles : Array = []     # Mike: caught projectile queue (max caught_capacity)
 
 var tiles_traveled_this_turn : int    = 0
 var swift_kill_count         : int    = 0
@@ -260,6 +296,15 @@ func setup_from_preset(preset_name: String) -> void:
 	actions_per_turn  = p["actions_per_turn"]
 	actions_left      = p["actions_per_turn"]
 	uses_draw_shot    = p["uses_draw_shot"]
+	# Tuning values
+	bombs_left         = p.get("bombs_per_floor",    0)
+	bomb_aoe_damage    = p.get("bomb_aoe_damage",    0)
+	grapples_left      = p.get("grapples_per_floor", 0)
+	proj_launch_speed  = p.get("proj_launch_speed",  0.0)
+	proj_decay_rate    = p.get("proj_decay_rate",    0.0)
+	proj_min_speed     = p.get("proj_min_speed",     0.0)
+	proj_neg_bounce    = p.get("proj_neg_bounce",    0.0)
+	caught_capacity    = p.get("caught_capacity",    0)
 	if name_label:
 		name_label.text = preset_name
 	# Tô màu placeholder body theo preset (chỉ áp dụng khi vẫn dùng capsule
@@ -282,6 +327,12 @@ func reset_turn() -> void:
 	disarmed                 = false
 	tiles_traveled_this_turn = 0
 	refresh_visuals()
+
+# Called once per floor clear — refills resource counters from preset.
+func reset_floor_state() -> void:
+	var p : Dictionary = CHARACTER_PRESETS.get(character_name, {})
+	bombs_left    = p.get("bombs_per_floor",    0)
+	grapples_left = p.get("grapples_per_floor", 0)
 
 func use_action() -> void:
 	if not floor_cleared:

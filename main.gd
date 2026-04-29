@@ -53,21 +53,11 @@ const ChargeBarScene = preload("res://sonny_charge_bar.tscn")
 const TimingBarScene = preload("res://mike_timing_bar.tscn")
 # Mốc 8.3: Bouncing projectile cho Mike's Draw Shot
 const ProjectileScene = preload("res://projectile.tscn")
-const PROJECTILE_LAUNCH_SPEED  : float = 18.0
-const PROJECTILE_DECAY_RATE    : float = 0.85
-const PROJECTILE_MIN_SPEED     : float = 0.54   # = LAUNCH_SPEED * 0.03
-const PROJECTILE_NEG_BOUNCE    : float = 5.0
-# Fixed speeds for enemy-fired projectiles (no decay)
-const PROJ_ENEMY_SPEED_SLOW    : float = 5.0
-const PROJ_ENEMY_SPEED_NORMAL  : float = 8.0
-const PROJ_ENEMY_SPEED_FAST    : float = 14.0
+# Fixed speeds for enemy-fired projectiles (no decay; tuning is enemy-side)
+const PROJ_ENEMY_SPEED_SLOW   : float = 5.0
+const PROJ_ENEMY_SPEED_NORMAL : float = 8.0
+const PROJ_ENEMY_SPEED_FAST   : float = 14.0
 const PROJECTILE_Y            : float = 1.10   # độ cao bay (giữa thân character)
-# Mốc 7.3: Bomb fuse
-const BOMB_FUSE_TURNS    : int = 2
-const BOMB_AOE_DAMAGE    : int = 2
-const SONNY_BOMBS_PER_FLOOR : int = 1
-# Mốc 8.3.4: Grapple gun (Mike W)
-const MIKE_GRAPPLES_PER_FLOOR : int = 2
 
 # Mốc 9.1: Floor scenarios — composition mỗi floor (column layout + enemies).
 # `current_floor` index vào array; floor cuối là boss.
@@ -197,21 +187,13 @@ var enemies              : Array = []          # Array of Enemy nodes
 var valid_attack_targets : Array = []          # Array of Vector2i — enemy hex kề bên hiện tại có thể tấn công
 
 # Mốc 7 — Sonny charge bar + bomb state
-var sonny_charge_bar     : Node = null         # active charge bar instance (nếu đang giữ LMB)
-var sonny_charge_target  : Node = null         # enemy đang bị Sonny "Boong"
-var sonny_attack_mode    : bool = false        # true while Sonny Q is toggled (target selection)
-var placing_bomb         : bool = false        # true khi Sonny đang chọn ô đặt bomb
-var sonny_bombs_left     : int  = SONNY_BOMBS_PER_FLOOR
+var sonny_charge_bar    : Node = null   # active charge bar instance (nếu đang giữ LMB)
+var sonny_charge_target : Node = null   # enemy đang bị Sonny "Boong"
 
 # Mốc 8 — Mike timing bar state
 var mike_timing_bar        : Node    = null
 var mike_timing_target_pos : Vector3 = Vector3.ZERO  # free direction Vector3
 var mike_aim_overlay       : Node    = null   # AimOverlay3D — preview projectile path
-var mike_aiming            : bool    = false  # true while choosing aim direction
-var mike_shot_used         : bool    = false  # one shot per turn; resets on new player turn
-# Mốc 8.3.4 — grapple gun state
-var grappling            : bool = false
-var mike_grapples_left   : int  = MIKE_GRAPPLES_PER_FLOOR
 
 # ─── Projectile runtime state ────────────────────────────────
 var active_projectiles  : Array      = []    # Array[Projectile3D]
@@ -220,10 +202,8 @@ var _proj_last_char_hex : Dictionary = {}    # instance_id → Vector2i (last ch
 var _proj_prev_pos      : Dictionary = {}    # instance_id → Vector3  (world pos previous frame)
 var _proj_bounds_min    : Vector3    = Vector3.ZERO
 var _proj_bounds_max    : Vector3    = Vector3.ZERO
-# Reaction timing — SPACE press timestamp (Engine.get_process_time())
+# Reaction timing — SPACE press timestamp
 var _space_pressed_at   : float = -100.0
-# Mike's caught projectile queue (max 2), each = {damage, speed, neg_bounce, uses_decay}
-var _mike_caught        : Array = []
 
 # ─── Turn state ──────────────────────────────────────────────
 enum Phase { PLAYER_TURN, ENEMY_TURN, DODGE_PHASE, DEAD, FLOOR_CLEAR, VICTORY }
@@ -469,7 +449,7 @@ func _on_hud_reset() -> void:
 func _on_hud_avatar_clicked(char_name: String) -> void:
 	if phase != Phase.PLAYER_TURN: return
 	if sonny_charge_bar != null or mike_timing_bar != null: return
-	if placing_bomb: return
+	if not players.is_empty() and players[current_player_index].placing_bomb: return
 	var idx : int = player_names.find(char_name)
 	if idx < 0 or idx == current_player_index: return
 	if players[idx].hp <= 0: return
@@ -734,50 +714,48 @@ func _refresh_tile_colors() -> void:
 	if not players.is_empty():
 		cur_pos = player_positions[current_player_index]
 
-	# Grapple mode (Mike W): tô đỏ tất cả enemy như potential targets.
-	# Click hex nào cũng được → fire hook xuyên tường.
-	if grappling and not players.is_empty():
-		for key in tiles:
-			var tile = tiles[key]
-			if key in column_tiles or key in fire_pit_tiles:
-				tile.set_state("normal")
-			elif key == cur_pos:
-				tile.set_state("selected")
-			elif key in enemy_pos:
-				tile.set_state("attack")
-			else:
-				tile.set_state("normal")
-		_update_grapple_preview()
-		return
+	if not players.is_empty():
+		var _cur = players[current_player_index]
+		# Grapple mode (Mike W): tô đỏ tất cả enemy như potential targets.
+		if _cur.grappling:
+			for key in tiles:
+				var tile = tiles[key]
+				if key in column_tiles or key in fire_pit_tiles:
+					tile.set_state("normal")
+				elif key == cur_pos:
+					tile.set_state("selected")
+				elif key in enemy_pos:
+					tile.set_state("attack")
+				else:
+					tile.set_state("normal")
+			_update_grapple_preview()
+			return
 
-	# Bomb placement mode: highlight ô kề bên passable+empty (xanh "valid"),
-	# hover sẽ đỏ chói "attack" để báo "đặt ở đây?". Override hoàn toàn logic
-	# bình thường khi placing_bomb=true.
-	if placing_bomb and not players.is_empty():
-		_clear_aim_preview()
-		var cur_p = players[current_player_index]
-		for key in tiles:
-			var tile = tiles[key]
-			if key in column_tiles or key in fire_pit_tiles:
-				tile.set_state("normal")
-				continue
-			var is_bomb_target : bool = (
-				_hex_dist(cur_p.grid_col, cur_p.grid_row, key.x, key.y) == 1
-				and is_valid_and_passable(key.x, key.y)
-				and _get_enemy_at(key) == null
-				and _get_player_at(key) < 0
-			)
-			if key == cur_pos:
-				tile.set_state("selected")
-			elif is_bomb_target and key == hover_hex:
-				tile.set_state("attack")
-			elif is_bomb_target:
-				tile.set_state("valid")
-			elif key in enemy_pos:
-				tile.set_state("enemy")
-			else:
-				tile.set_state("normal")
-		return
+		# Bomb placement mode: highlight ô kề bên passable+empty.
+		if _cur.placing_bomb:
+			_clear_aim_preview()
+			for key in tiles:
+				var tile = tiles[key]
+				if key in column_tiles or key in fire_pit_tiles:
+					tile.set_state("normal")
+					continue
+				var is_bomb_target : bool = (
+					_hex_dist(_cur.grid_col, _cur.grid_row, key.x, key.y) == 1
+					and is_valid_and_passable(key.x, key.y)
+					and _get_enemy_at(key) == null
+					and _get_player_at(key) < 0
+				)
+				if key == cur_pos:
+					tile.set_state("selected")
+				elif is_bomb_target and key == hover_hex:
+					tile.set_state("attack")
+				elif is_bomb_target:
+					tile.set_state("valid")
+				elif key in enemy_pos:
+					tile.set_state("enemy")
+				else:
+					tile.set_state("normal")
+			return
 
 	# Highlight rule (theo yêu cầu user):
 	#  ► Hover chỉ light-up nếu ô đó nằm trong valid_moves (xanh) hoặc là enemy có
@@ -953,7 +931,7 @@ func _update_valid_attack_targets() -> void:
 		if _can_attack_target(pos.x, pos.y, e.grid_col, e.grid_row):
 			valid_attack_targets.append(Vector2i(e.grid_col, e.grid_row))
 	# Sonny attack mode: also highlight adjacent players as targets
-	if sonny_attack_mode and not current.uses_draw_shot:
+	if current.attack_mode and not current.uses_draw_shot:
 		for i in range(players.size()):
 			if i == current_player_index or players[i].hp <= 0: continue
 			var ph : Vector2i = player_positions[i]
@@ -1023,27 +1001,27 @@ func _handle_lmb_press(mouse_pos: Vector2) -> void:
 	if mike_timing_bar != null: return    # đang aim — bỏ qua
 	var hex : Vector2i = mouse_to_hex(mouse_pos)
 	if hex.x < 0: return
+	var current_player = players[current_player_index]
 	# Bomb placement mode (Sonny W) — click vào ô kề bên hợp lệ
-	if placing_bomb:
+	if current_player.placing_bomb:
 		_place_bomb_at(hex)
 		return
 	# Grapple mode (Mike W) — click vào hex bất kỳ → fire hook
-	if grappling:
+	if current_player.grappling:
 		_grapple_at(hex)
 		return
-	var current_player = players[current_player_index]
 	# Mike aim mode owns all clicks — commit shot direction, no character switch.
-	if current_player.uses_draw_shot and mike_aiming:
+	if current_player.uses_draw_shot and current_player.aiming:
 		var world_pos : Vector3 = mouse_to_ground(mouse_pos)
 		if not is_nan(world_pos.x):
 			var mike_pos : Vector3 = current_player.position
 			if absf(world_pos.x - mike_pos.x) > 0.01 \
 					or absf(world_pos.z - mike_pos.z) > 0.01:
-				mike_aiming = false
+				current_player.aiming = false
 				_start_mike_timing(world_pos, mouse_pos)
 		return   # consume LMB while aiming (no movement, no switch)
 	# Sonny attack mode owns all clicks — commit attack on valid target, no character switch.
-	if not current_player.uses_draw_shot and sonny_attack_mode:
+	if not current_player.uses_draw_shot and current_player.attack_mode:
 		var target : Node = _get_enemy_at(hex)
 		if target == null:
 			var pidx : int = _get_player_at(hex)
@@ -1108,7 +1086,7 @@ func _start_sonny_charge(target: Node) -> void:
 func _on_charge_resolved(result: String, target: Node) -> void:
 	sonny_charge_bar    = null
 	sonny_charge_target = null
-	sonny_attack_mode   = false
+	players[current_player_index].attack_mode = false
 	if not is_instance_valid(target):
 		_refresh_debug()
 		return
@@ -1163,10 +1141,11 @@ func _on_charge_resolved(result: String, target: Node) -> void:
 # nhầm khi đi).
 # Helper: clear mọi action mode khi switch player hoặc end turn.
 func _clear_action_modes() -> void:
-	placing_bomb      = false
-	grappling         = false
-	mike_aiming       = false
-	sonny_attack_mode = false
+	for p in players:
+		p.placing_bomb  = false
+		p.grappling     = false
+		p.aiming        = false
+		p.attack_mode   = false
 	_clear_aim_preview()
 
 func _toggle_mike_aim_mode() -> void:
@@ -1174,10 +1153,10 @@ func _toggle_mike_aim_mode() -> void:
 	if players.is_empty(): return
 	var current = players[current_player_index]
 	if not current.uses_draw_shot: return
-	if mike_shot_used: return             # safety: Q disabled after shot fires
+	if current.shot_used: return          # safety: Q disabled after shot fires
 	if mike_timing_bar != null: return    # timing bar active, cannot toggle
-	mike_aiming = not mike_aiming
-	if not mike_aiming:
+	current.aiming = not current.aiming
+	if not current.aiming:
 		_clear_aim_preview()
 	_refresh_tile_colors()                # trigger _update_aim_preview ở cuối
 	_refresh_debug()
@@ -1189,7 +1168,7 @@ func _toggle_sonny_attack_mode() -> void:
 	if current.uses_draw_shot: return
 	if not current.can_act(): return
 	if sonny_charge_bar != null: return
-	sonny_attack_mode = not sonny_attack_mode
+	current.attack_mode = not current.attack_mode
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_debug()
@@ -1212,10 +1191,13 @@ func _start_mike_timing(target_pos: Vector3, mouse_pos: Vector2) -> void:
 	mike_aim_overlay.show_path(trace_result["segs"])
 
 func _update_grapple_preview() -> void:
-	if not grappling or players.is_empty():
+	if players.is_empty():
 		_clear_aim_preview()
 		return
 	var current = players[current_player_index]
+	if not current.grappling:
+		_clear_aim_preview()
+		return
 	if hover_hex.x < 0 or hover_hex == Vector2i(current.grid_col, current.grid_row):
 		_clear_aim_preview()
 		return
@@ -1263,7 +1245,7 @@ func _update_aim_preview() -> void:
 		_clear_aim_preview()
 		return
 	# Chỉ vẽ preview khi đang aim mode (Q đã bật)
-	if not mike_aiming:
+	if not current.aiming:
 		_clear_aim_preview()
 		return
 	# Cursor world position phải hợp lệ (ray hit ground plane)
@@ -1303,7 +1285,7 @@ func _on_mike_timing_resolved(result: String, target_pos: Vector3) -> void:
 	current.use_action()
 	current.has_attacked = true
 	attack_committed_this_round = true
-	mike_shot_used = true
+	current.shot_used = true
 	if dmg > 0:
 		_face_player_to_position(current, target_pos)
 		if current.has_method("play_attack"):
@@ -1311,9 +1293,10 @@ func _on_mike_timing_resolved(result: String, target_pos: Vector3) -> void:
 		var dir := Vector3(target_pos.x - current.position.x, 0.0,
 			target_pos.z - current.position.z).normalized()
 		var start := Vector3(current.position.x, PROJECTILE_Y, current.position.z)
-		_fire_projectile(current, start, dir, float(dmg), true, PROJECTILE_NEG_BOUNCE)
+		_fire_projectile(current, start, dir, float(dmg), true,
+				current.proj_neg_bounce, current.proj_launch_speed)
 		# Fire any caught projectiles 0.3s apart in the same direction
-		if not _mike_caught.is_empty():
+		if not current.caught_projectiles.is_empty():
 			_fire_mike_caught_projectiles_async(current, dir)
 	else:
 		_spawn_damage_popup(current.position + Vector3(0, 1.8, 0),
@@ -1351,10 +1334,10 @@ func _compute_projectile_trace(shooter, target_pos: Vector3) -> Dictionary:
 	tracer.entities = enemy_dict
 	tracer.hex_to_world = self.hex_to_world
 	tracer.world_to_hex = func(p: Vector3) -> Vector2i: return world_to_hex(p)
-	tracer.launch_speed    = PROJECTILE_LAUNCH_SPEED
-	tracer.decay_rate      = PROJECTILE_DECAY_RATE
-	tracer.min_speed       = PROJECTILE_MIN_SPEED
-	tracer.negative_bounce = PROJECTILE_NEG_BOUNCE
+	tracer.launch_speed    = shooter.proj_launch_speed
+	tracer.decay_rate      = shooter.proj_decay_rate
+	tracer.min_speed       = shooter.proj_min_speed
+	tracer.negative_bounce = shooter.proj_neg_bounce
 	var shooter_pos : Vector3 = shooter.position
 	var dir : Vector3 = Vector3(target_pos.x - shooter_pos.x, 0.0,
 		target_pos.z - shooter_pos.z).normalized()
@@ -1374,7 +1357,7 @@ func _compute_projectile_trace(shooter, target_pos: Vector3) -> Dictionary:
 # Spawn and register a projectile. Returns the node.
 func _fire_projectile(owner_nd: Node, start_pos: Vector3, direction: Vector3,
 		damage: float, uses_decay: bool, neg_bounce: float,
-		speed: float = PROJECTILE_LAUNCH_SPEED) -> Projectile3D:
+		speed: float) -> Projectile3D:
 	var proj : Projectile3D = ProjectileScene.instantiate()
 	proj.proj_speed      = speed
 	proj.proj_direction  = Vector3(direction.x, 0.0, direction.z).normalized()
@@ -1411,8 +1394,8 @@ func _fire_enemy_projectile(enemy: Node, target_idx: int, attack: Dictionary) ->
 
 # Fire Mike's caught projectiles 0.3s apart in the shot direction (background).
 func _fire_mike_caught_projectiles_async(shooter: Node, direction: Vector3) -> void:
-	var caught := _mike_caught.duplicate()
-	_mike_caught.clear()
+	var caught := shooter.caught_projectiles.duplicate()
+	shooter.caught_projectiles.clear()
 	for cd in caught:
 		await get_tree().create_timer(0.30).timeout
 		if not is_instance_valid(shooter): break
@@ -1571,9 +1554,12 @@ func _handle_player_proj_contact_async(proj: Projectile3D, player_idx: int) -> v
 			if is_sonny:
 				# Normalize to player-like physics so enemy projectiles redirect correctly
 				# (enemy projs have neg_bounce=9999 and no decay, which would break redirect)
-				proj.negative_bounce = PROJECTILE_NEG_BOUNCE
+				var _mike : Node = null
+				for _p in players:
+					if _p.uses_draw_shot: _mike = _p; break
+				proj.negative_bounce = _mike.proj_neg_bounce    if _mike else 5.0
+				proj.proj_speed      = minf(proj.proj_speed, _mike.proj_launch_speed if _mike else 18.0)
 				proj.uses_decay      = true
-				proj.proj_speed      = minf(proj.proj_speed, PROJECTILE_LAUNCH_SPEED)
 				# Sonny: redirect toward mouse cursor
 				var mouse_dir : Vector3 = Vector3(
 					hover_world_pos.x - player.position.x, 0.0,
@@ -1588,11 +1574,11 @@ func _handle_player_proj_contact_async(proj: Projectile3D, player_idx: int) -> v
 			else:
 				# Mike: catch/delete projectile
 				if proj.owner_node != player:
-					if _mike_caught.size() < 2:
-						_mike_caught.append({
+					if player.caught_projectiles.size() < player.caught_capacity:
+						player.caught_projectiles.append({
 							"damage":     proj.proj_damage,
 							"speed":      proj.proj_speed,
-							"neg_bounce": PROJECTILE_NEG_BOUNCE,
+							"neg_bounce": player.proj_neg_bounce,
 							"uses_decay": proj.uses_decay,
 						})
 						_spawn_damage_popup(head_pos, "CAUGHT!", Color(0.31, 1.00, 0.51))
@@ -1663,15 +1649,15 @@ func _toggle_bomb_placement() -> void:
 	var current = players[current_player_index]
 	if current.uses_draw_shot: return       # Mike không có bomb
 	if not current.can_act(): return
-	if sonny_bombs_left <= 0: return
+	if current.bombs_left <= 0: return
 	if sonny_charge_bar != null: return
-	placing_bomb = not placing_bomb
+	current.placing_bomb = not current.placing_bomb
 	_refresh_tile_colors()
 	_refresh_debug()
 
 func _place_bomb_at(hex: Vector2i) -> void:
-	if not placing_bomb: return
 	var current = players[current_player_index]
+	if not current.placing_bomb: return
 	var d : int = _hex_dist(current.grid_col, current.grid_row, hex.x, hex.y)
 	if d != 1: return
 	if not is_valid_and_passable(hex.x, hex.y): return
@@ -1683,8 +1669,8 @@ func _place_bomb_at(hex: Vector2i) -> void:
 	if hud != null:
 		hud.register_enemy(bomb.get_instance_id(), "BOMB", bomb.hp, bomb.max_hp,
 			bomb.display_label, bomb.body_color)
-	sonny_bombs_left -= 1
-	placing_bomb       = false
+	current.bombs_left  -= 1
+	current.placing_bomb = false
 	current.use_action()
 	attack_committed_this_round = true
 	_update_valid_moves()
@@ -1706,15 +1692,15 @@ func _toggle_grapple_mode() -> void:
 	var current = players[current_player_index]
 	if not current.uses_draw_shot: return        # chỉ Mike
 	if not current.can_act(): return
-	if mike_grapples_left <= 0: return
+	if current.grapples_left <= 0: return
 	if mike_timing_bar != null: return
-	grappling = not grappling
+	current.grappling = not current.grappling
 	_refresh_tile_colors()
 	_refresh_debug()
 
 func _grapple_at(hex: Vector2i) -> void:
-	if not grappling: return
 	var current = players[current_player_index]
+	if not current.grappling: return
 	var src : Vector2i = Vector2i(current.grid_col, current.grid_row)
 	if hex == src: return
 
@@ -1735,8 +1721,8 @@ func _grapple_at(hex: Vector2i) -> void:
 			pull_idx_in_path = i
 			break
 
-	grappling = false
-	mike_grapples_left -= 1
+	current.grappling     = false
+	current.grapples_left -= 1
 	current.use_action()
 	attack_committed_this_round = true
 
@@ -1821,15 +1807,19 @@ func _explode_bomb(bomb: Node) -> void:
 	var center   : Vector3 = bomb.position
 	_spawn_damage_popup(center + Vector3(0, 1.5, 0), "BOOM!",
 		Color(1.0, 0.55, 0.10))
+	var _bomb_dmg : int = 2
+	for _p in players:
+		if not _p.uses_draw_shot:
+			_bomb_dmg = _p.bomb_aoe_damage; break
 	var aoe : Array = [Vector2i(bomb_col, bomb_row)]
 	for nb in _get_neighbors(bomb_col, bomb_row):
 		aoe.append(nb)
 	for hex in aoe:
 		var e_in : Node = _get_enemy_at(hex)
 		if e_in != null and e_in != bomb:
-			e_in.take_damage(BOMB_AOE_DAMAGE)
+			e_in.take_damage(_bomb_dmg)
 			_spawn_damage_popup(e_in.position + Vector3(0, 1.8, 0),
-				"-%d" % BOMB_AOE_DAMAGE, Color(1.0, 0.55, 0.30))
+				"-%d" % _bomb_dmg, Color(1.0, 0.55, 0.30))
 			if e_in.hp <= 0:
 				_do_kill_enemy(e_in)
 			else:
@@ -1838,7 +1828,7 @@ func _explode_bomb(bomb: Node) -> void:
 						e_in.hp, e_in.max_hp)
 		var p_idx : int = _get_player_at(hex)
 		if p_idx >= 0:
-			_apply_damage_to_player(p_idx, BOMB_AOE_DAMAGE, "hit")
+			_apply_damage_to_player(p_idx, _bomb_dmg, "hit")
 	_do_kill_enemy(bomb)
 	_check_floor_clear()
 	await get_tree().create_timer(0.3).timeout
@@ -1940,8 +1930,8 @@ func _do_kill_enemy(enemy: Node) -> void:
 func _check_floor_clear() -> void:
 	if not enemies.is_empty(): return
 	if phase == Phase.FLOOR_CLEAR or phase == Phase.VICTORY: return
-	sonny_bombs_left   = SONNY_BOMBS_PER_FLOOR
-	mike_grapples_left = MIKE_GRAPPLES_PER_FLOOR
+	for p in players:
+		p.reset_floor_state()
 	var scenario : Dictionary = _current_scenario()
 	var is_boss : bool = scenario.get("is_boss", false)
 	if is_boss:
@@ -2119,8 +2109,9 @@ func _run_enemy_turn() -> void:
 		if p.hp > 0:
 			p.reset_turn()
 	players_turned_this_round = []
-	mike_shot_used = false
-	mike_aiming    = false
+	for p in players:
+		p.shot_used = false
+		p.aiming    = false
 	_clear_aim_preview()
 	# Chọn player còn sống đầu tiên
 	current_player_index = 0
@@ -2519,21 +2510,23 @@ func _process(delta: float) -> void:
 func _input(event: InputEvent) -> void:
 	# ESC = cancel bomb/grapple/aim mode trước, sau đó mới quit game
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		if placing_bomb:
-			placing_bomb = false
-			_refresh_tile_colors()
-			_refresh_debug()
-			return
-		if grappling:
-			grappling = false
-			_refresh_tile_colors()
-			_refresh_debug()
-			return
-		if mike_aiming:
-			mike_aiming = false
-			_clear_aim_preview()
-			_refresh_debug()
-			return
+		if not players.is_empty():
+			var _esc_cur = players[current_player_index]
+			if _esc_cur.placing_bomb:
+				_esc_cur.placing_bomb = false
+				_refresh_tile_colors()
+				_refresh_debug()
+				return
+			if _esc_cur.grappling:
+				_esc_cur.grappling = false
+				_refresh_tile_colors()
+				_refresh_debug()
+				return
+			if _esc_cur.aiming:
+				_esc_cur.aiming = false
+				_clear_aim_preview()
+				_refresh_debug()
+				return
 		get_tree().quit()
 		return
 
@@ -2556,7 +2549,8 @@ func _input(event: InputEvent) -> void:
 					camera_distance - CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX)
 				_update_camera(); _refresh_debug()
 			KEY_TAB:
-				if phase == Phase.PLAYER_TURN and not mike_aiming and mike_timing_bar == null:
+				if phase == Phase.PLAYER_TURN and mike_timing_bar == null \
+						and (players.is_empty() or not players[current_player_index].aiming):
 					_switch_player_to_other()
 			KEY_D:
 				if phase == Phase.PLAYER_TURN:
@@ -2609,10 +2603,12 @@ func _input(event: InputEvent) -> void:
 
 	# ── RMB: cancel aim mode (design §5); otherwise orbit camera ───────
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
-		if event.pressed and (mike_aiming or mike_timing_bar != null or sonny_attack_mode):
+		var _rmb_cur : Node = players[current_player_index] if not players.is_empty() else null
+		if event.pressed and (_rmb_cur != null and (_rmb_cur.aiming or _rmb_cur.attack_mode) or mike_timing_bar != null):
 			# Cancel aim / timing bar / Sonny attack mode (no action was consumed yet)
-			mike_aiming       = false
-			sonny_attack_mode = false
+			if _rmb_cur != null:
+				_rmb_cur.aiming       = false
+				_rmb_cur.attack_mode  = false
 			_clear_aim_preview()
 			if mike_timing_bar != null and is_instance_valid(mike_timing_bar):
 				mike_timing_bar.queue_free()
@@ -2668,13 +2664,13 @@ func _refresh_debug() -> void:
 		debug_label.text = "pitch %.0f° yaw %.0f° dist %.0f  hover=%s" \
 			% [camera_pitch_deg, camera_yaw_deg, camera_distance, str(hover_hex)]
 		return
-	if placing_bomb:
+	var cur = players[current_player_index]
+	if cur.placing_bomb:
 		debug_label.text = "[PLACING BOMB] click ô kề bên (passable) để đặt — ESC = cancel"
 		return
-	if grappling:
+	if cur.grappling:
 		debug_label.text = "[GRAPPLE] click hex bất kỳ để kéo entity đầu tiên trên đường — ESC = cancel"
 		return
-	var cur = players[current_player_index]
 	var phase_str : String
 	match phase:
 		Phase.PLAYER_TURN: phase_str = "PLAYER"
@@ -2685,12 +2681,12 @@ func _refresh_debug() -> void:
 	# Hints khác nhau cho Sonny (Boong + bomb) vs Mike (ranged)
 	var hints : String
 	if cur.uses_draw_shot:
-		var aim_state : String = "[AIMING] " if mike_aiming else ""
+		var aim_state : String = "[AIMING] " if cur.aiming else ""
 		hints = "%sQ=Aim  LMB=move/Shoot  W=Grapple(%d)  Tab=swap  D=end" \
-			% [aim_state, mike_grapples_left]
+			% [aim_state, cur.grapples_left]
 	else:
 		hints = "LMB=move/Boong(hold)  W=Bomb(%d)  Tab=swap  D=end  SPACE=dodge" \
-			% sonny_bombs_left
+			% cur.bombs_left
 	debug_label.text = "[%s] %s | %s HP %d/%d  Act %d/%d   |   %s   |   pitch %.0f° dist %.0f" \
 		% [
 			floor_name,
