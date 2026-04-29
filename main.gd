@@ -869,15 +869,18 @@ func _on_charge_resolved(result: String, target_enemy: Node) -> void:
 		_face_player_to_position(current_player, target_enemy.position)
 		if current_player.has_method("play_attack"):
 			current_player.play_attack()
-		target_enemy.take_damage(dmg)
-		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
-			"-%d" % dmg, Color(1.0, 0.55, 0.30))
-		if target_enemy.hp <= 0:
-			_kill_enemy(target_enemy)
-		else:
-			if hud != null:
-				hud.update_enemy_hp(target_enemy.get_instance_id(),
-					target_enemy.hp, target_enemy.max_hp)
+		# Push 1 before damage (design §11: push always resolves before damage)
+		_push_enemy(target_enemy, current_player.grid_col, current_player.grid_row, 1)
+		if is_instance_valid(target_enemy) and target_enemy.hp > 0:
+			target_enemy.take_damage(dmg)
+			_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
+				"-%d" % dmg, Color(1.0, 0.55, 0.30))
+			if target_enemy.hp <= 0:
+				_kill_enemy(target_enemy)
+			else:
+				if hud != null:
+					hud.update_enemy_hp(target_enemy.get_instance_id(),
+						target_enemy.hp, target_enemy.max_hp)
 	else:
 		_spawn_damage_popup(target_enemy.position + Vector3(0, 1.8, 0),
 			"MISS!", Color(0.7, 0.7, 0.7))
@@ -1109,20 +1112,6 @@ func _place_bomb_at(hex: Vector2i) -> void:
 	if _get_player_at(hex) >= 0: return
 
 	var bomb = _spawn_enemy("bomb", hex.x, hex.y)
-	bomb.fuse_turns = BOMB_FUSE_TURNS
-	# Fuse countdown Label3D trên đầu bomb
-	var fuse_label := Label3D.new()
-	fuse_label.name                = "FuseLabel"
-	fuse_label.text                = "FUSE %d" % bomb.fuse_turns
-	fuse_label.font_size           = 56
-	fuse_label.pixel_size          = 0.005
-	fuse_label.outline_size        = 6
-	fuse_label.outline_modulate    = Color(0, 0, 0, 0.95)
-	fuse_label.modulate            = Color(1.0, 0.5, 0.1)
-	fuse_label.position            = Vector3(0, 1.7, 0)
-	fuse_label.no_depth_test       = true
-	fuse_label.billboard           = BaseMaterial3D.BILLBOARD_ENABLED
-	bomb.add_child(fuse_label)
 	# HUD register — bomb hiện trong enemy panel với label "B"
 	if hud != null:
 		hud.register_enemy(bomb.get_instance_id(), "BOMB", bomb.hp, bomb.max_hp,
@@ -1253,22 +1242,7 @@ func _spawn_grapple_line(start: Vector3, end: Vector3) -> void:
 	tw.tween_property(mat, "albedo_color:a", 0.0, 0.30)
 	tw.tween_callback(mi.queue_free)
 
-# Sau mỗi enemy turn, decrement fuse + explode bomb hết hạn.
-func _tick_bombs_after_enemy_turn() -> void:
-	var to_explode : Array = []
-	for e in enemies.duplicate():
-		if not is_instance_valid(e): continue
-		if e.enemy_type != "bomb": continue
-		e.fuse_turns -= 1
-		var label = e.get_node_or_null("FuseLabel")
-		if label:
-			label.text = "FUSE %d" % maxi(e.fuse_turns, 0)
-		if e.fuse_turns <= 0:
-			to_explode.append(e)
-	for bomb in to_explode:
-		await _explode_bomb(bomb)
-
-# Bomb nổ: AOE = bomb tile + 6 ô kề. Damage tất cả entities (enemies + players).
+# Bomb nổ khi HP = 0: AOE = bomb tile + 6 ô kề. Damage tất cả entities (enemies + players).
 func _explode_bomb(bomb: Node) -> void:
 	var bomb_col : int = bomb.grid_col
 	var bomb_row : int = bomb.grid_row
@@ -1285,7 +1259,7 @@ func _explode_bomb(bomb: Node) -> void:
 			_spawn_damage_popup(e_in.position + Vector3(0, 1.8, 0),
 				"-%d" % BOMB_AOE_DAMAGE, Color(1.0, 0.55, 0.30))
 			if e_in.hp <= 0:
-				_kill_enemy(e_in)
+				_do_kill_enemy(e_in)
 			else:
 				if hud != null:
 					hud.update_enemy_hp(e_in.get_instance_id(),
@@ -1293,7 +1267,7 @@ func _explode_bomb(bomb: Node) -> void:
 		var p_idx : int = _get_player_at(hex)
 		if p_idx >= 0:
 			_apply_damage_to_player(p_idx, BOMB_AOE_DAMAGE, "hit")
-	_kill_enemy(bomb)
+	_do_kill_enemy(bomb)
 	_check_floor_clear()
 	await get_tree().create_timer(0.3).timeout
 
@@ -1325,7 +1299,66 @@ func _player_attack_enemy(enemy: Node) -> void:
 	_refresh_hud()
 	_check_floor_clear()
 
+# Push enemy 1 hex away from (from_col, from_row). Push resolves before damage (design §11).
+# Collision: wall/column → pushed target takes push_value dmg; enemy collision → both take 1 dmg.
+func _push_enemy(enemy: Node, from_col: int, from_row: int, push_value: int) -> void:
+	if push_value <= 0 or not is_instance_valid(enemy): return
+	var to_cube := func(c: int, r: int) -> Vector3i:
+		var x := c; var z := r - (c - (c & 1)) / 2
+		return Vector3i(x, -x - z, z)
+	var cube_from : Vector3i = to_cube.call(from_col, from_row)
+	var cube_self : Vector3i = to_cube.call(enemy.grid_col, enemy.grid_row)
+	var cube_dest : Vector3i = cube_self + (cube_self - cube_from)
+	var dc : int = cube_dest.x
+	var dr : int = cube_dest.z + (dc - (dc & 1)) / 2
+	var dest := Vector2i(dc, dr)
+
+	if not is_valid_and_passable(dest.x, dest.y):
+		enemy.take_damage(push_value)
+		_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
+			"-%d" % push_value, Color(1.0, 0.3, 0.3))
+		if enemy.hp <= 0:
+			_kill_enemy(enemy)
+		elif hud != null:
+			hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
+		return
+
+	var other_enemy : Node = _get_enemy_at(dest)
+	var other_p_idx : int  = _get_player_at(dest)
+	if other_enemy != null or other_p_idx >= 0:
+		enemy.take_damage(1)
+		_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
+			"-1", Color(1.0, 0.3, 0.3))
+		if enemy.hp <= 0:
+			_kill_enemy(enemy)
+		elif hud != null:
+			hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
+		if other_enemy != null:
+			other_enemy.take_damage(1)
+			_spawn_damage_popup(other_enemy.position + Vector3(0, 1.8, 0),
+				"-1", Color(1.0, 0.3, 0.3))
+			if is_instance_valid(other_enemy):
+				if other_enemy.hp <= 0:
+					_kill_enemy(other_enemy)
+				elif hud != null:
+					hud.update_enemy_hp(other_enemy.get_instance_id(), other_enemy.hp, other_enemy.max_hp)
+			if push_value > 1 and is_instance_valid(other_enemy) and other_enemy.hp > 0:
+				_push_enemy(other_enemy, enemy.grid_col, enemy.grid_row, push_value - 1)
+		elif other_p_idx >= 0:
+			_apply_damage_to_player(other_p_idx, 1, "hit")
+		return
+
+	enemy.grid_col = dest.x
+	enemy.grid_row = dest.y
+	_move_entity_smooth(enemy, dest.x, dest.y)
+
 func _kill_enemy(enemy: Node) -> void:
+	if enemy.enemy_type == "bomb":
+		_explode_bomb(enemy)   # runs as background coroutine
+		return
+	_do_kill_enemy(enemy)
+
+func _do_kill_enemy(enemy: Node) -> void:
 	if hud != null:
 		hud.remove_enemy(enemy.get_instance_id())
 	enemies.erase(enemy)
@@ -1500,9 +1533,6 @@ func _run_enemy_turn() -> void:
 		if _all_players_dead(): break
 		await _run_enemy_actions(enemy)
 		await get_tree().create_timer(ACTION_DELAY * 0.4).timeout
-
-	# Decrement fuse + nổ bomb hết hạn (Mốc 7.3)
-	await _tick_bombs_after_enemy_turn()
 
 	if _all_players_dead():
 		phase = Phase.DEAD

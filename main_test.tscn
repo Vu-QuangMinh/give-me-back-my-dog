@@ -1,0 +1,68 @@
+[gd_scene format=3 uid="uid://0dsioy2r2e1p"]
+
+[ext_resource type="Script" uid="uid://bbi3eatjgpex7" path="res://main_test.gd" id="1_test"]
+[ext_resource type="PackedScene" uid="uid://b8hudm0ckm0c5" path="res://hud.tscn" id="2_hud"]
+
+[sub_resource type="ProceduralSkyMaterial" id="Sky_mat"]
+sky_top_color = Color(0.07, 0.08, 0.13, 1)
+sky_horizon_color = Color(0.16, 0.17, 0.22, 1)
+ground_bottom_color = Color(0.04, 0.04, 0.06, 1)
+ground_horizon_color = Color(0.1, 0.11, 0.14, 1)
+
+[sub_resource type="Sky" id="Sky_res"]
+sky_material = SubResource("Sky_mat")
+
+[sub_resource type="Environment" id="Env_main"]
+background_mode = 2
+sky = SubResource("Sky_res")
+ambient_light_source = 2
+ambient_light_color = Color(0.85, 0.88, 1, 1)
+ambient_light_energy = 0.45
+tonemap_mode = 2
+glow_enabled = true
+glow_intensity = 0.4
+glow_strength = 0.9
+glow_bloom = 0.05
+
+[sub_resource type="StandardMaterial3D" id="Mat_ground"]
+albedo_color = Color(0.06, 0.06, 0.09, 1)
+metallic_specular = 0.05
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(80, 80)
+
+[node name="Main" type="Node3D" unique_id=1659319874]
+script = ExtResource("1_test")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=2038928722]
+fov = 45.0
+near = 0.1
+far = 200.0
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=276715786]
+transform = Transform3D(0.8660254, -0.40957603, 0.28678823, 0, 0.57357645, 0.81915206, -0.5, -0.7094065, 0.49673176, 0, 0, 0)
+light_energy = 1.1
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=2058403313]
+environment = SubResource("Env_main")
+
+[node name="Ground" type="MeshInstance3D" parent="." unique_id=1860047592]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
+material_override = SubResource("Mat_ground")
+mesh = SubResource("PlaneMesh_ground")
+
+[node name="GameHUD" parent="." unique_id=1473498720 instance=ExtResource("2_hud")]
+
+[node name="CombatLayer" type="CanvasLayer" parent="." unique_id=1448444726]
+layer = 10
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1352949831]
+
+[node name="DebugLabel" type="Label" parent="HUD" unique_id=88487535]
+modulate = Color(0.95, 0.92, 0.5, 1)
+offset_left = 10.0
+offset_top = 10.0
+offset_right = 800.0
+offset_bottom = 32.0
+text = "[ ] pitch  -/= zoom  RMB-drag = orbit  LMB = select"
