@@ -2,67 +2,124 @@ extends Node3D
 class_name Projectile3D
 
 # ═══════════════════════════════════════════════════════════
-#  Projectile3D — Mốc 8.3.2
+#  Projectile3D — real-time physics projectile
 #
-#  Bay theo path_segs đã pre-compute bởi BounceTracer3D, mỗi seg là
-#  [start, end] Vector3 trên XZ plane. Speed = m/s tiêu thụ chiều dài
-#  từng seg, sang seg tiếp theo. Hit hexes đã biết từ trace, emit
-#  signal khi hit từng hex để main.gd apply damage.
+#  Moves every frame via _process(). Collision detection is
+#  handled externally by main.gd (_process_projectiles).
 #
-#  Setup từ main.gd:
-#    var p = ProjectileScene.instantiate()
-#    p.segs       = trace_result["segs"]
-#    p.hit_hexes  = trace_result["hit_hexes"]
-#    p.speed      = 18.0
-#    add_child(p)
-#    p.position = segs[0][0]   # start
-#    var hex = await p.projectile_finished
+#  Setup (from main.gd):
+#    var proj = ProjectileScene.instantiate()
+#    proj.proj_speed      = <speed>
+#    proj.proj_direction  = <dir>     # normalized XZ
+#    proj.proj_damage     = <dmg>
+#    proj.negative_bounce = <nb>      # 5.0 player, 9999 enemy
+#    proj.owner_node      = <owner>   # null = god-owned
+#    proj.uses_decay      = true/false
+#    add_child(proj)
+#    proj.position = start_pos
 # ═══════════════════════════════════════════════════════════
 
-signal projectile_finished(hit_hexes: Array)
+signal projectile_died()
 
-const DEFAULT_SPEED : float = 18.0
-const RADIUS        : float = 0.16
+const PROJ_RADIUS : float = 0.16
+const DECAY_RATE  : float = 0.85   # must equal PROJECTILE_DECAY_RATE in main.gd
+const MIN_SPEED   : float = 0.54   # = 18.0 * 0.03
 
-var segs        : Array = []
-var hit_hexes   : Array = []
-var speed       : float = DEFAULT_SPEED
+# ─── Physics (set before adding to scene tree) ────────────
+var proj_speed      : float   = 18.0
+var proj_direction  : Vector3 = Vector3.ZERO   # normalized, Y=0
+var proj_damage     : float   = 1.0
+var negative_bounce : float   = 5.0
+var owner_node      : Node    = null            # null = god-owned (hits everyone)
+var uses_decay      : bool    = true
+var redirect_count  : int     = 0
+var is_supercharged : bool    = false
 
-var _seg_idx       : int   = 0
-var _seg_progress  : float = 0.0
-var _ball_mesh     : MeshInstance3D = null
-var _ready_called  : bool  = false
+# ─── Internal ─────────────────────────────────────────────
+var _dead        : bool  = false
+var _ball_mat    : StandardMaterial3D = null
+var _blink_t     : float = 0.0
+
+# ═══════════════════════════════════════════════════════════
+#  LIFECYCLE
+# ═══════════════════════════════════════════════════════════
 
 func _ready() -> void:
-	_ball_mesh = MeshInstance3D.new()
+	_build_visuals()
+
+func _process(delta: float) -> void:
+	if _dead: return
+	if uses_decay:
+		proj_speed *= exp(-DECAY_RATE * delta)
+		if proj_speed < MIN_SPEED:
+			die()
+			return
+	position += proj_direction * proj_speed * delta
+	if is_supercharged and _ball_mat != null:
+		_blink_t += delta
+		_ball_mat.emission_energy_multiplier = 3.0 if fmod(_blink_t, 0.2) < 0.1 else 1.0
+
+# ═══════════════════════════════════════════════════════════
+#  COLLISION RESPONSES (called by main.gd)
+# ═══════════════════════════════════════════════════════════
+
+# Wall or column: reflect direction, subtract speed penalty.
+func bounce_off_surface(normal: Vector3) -> void:
+	if _dead: return
+	proj_direction = proj_direction.bounce(normal).normalized()
+	proj_direction.y = 0.0
+	proj_speed -= negative_bounce
+	if proj_speed < MIN_SPEED:
+		die()
+
+# Sonny perfect redirect: new direction toward mouse, speed bonus, god-owned.
+func redirect_to(new_dir: Vector3) -> void:
+	if _dead: return
+	proj_direction = Vector3(new_dir.x, 0.0, new_dir.z).normalized()
+	proj_speed    += negative_bounce * 0.5     # speed bonus per §5B
+	owner_node     = null                       # god-owned from here on
+	redirect_count += 1
+	if redirect_count >= 3:
+		is_supercharged = true
+		_set_supercharged_visuals()
+
+func die() -> void:
+	if _dead: return
+	_dead = true
+	emit_signal("projectile_died")
+	queue_free()
+
+# ═══════════════════════════════════════════════════════════
+#  VISUALS
+# ═══════════════════════════════════════════════════════════
+
+func _build_visuals() -> void:
 	var sphere := SphereMesh.new()
-	sphere.radius          = RADIUS
-	sphere.height          = RADIUS * 2.0
+	sphere.radius          = PROJ_RADIUS
+	sphere.height          = PROJ_RADIUS * 2.0
 	sphere.radial_segments = 18
 	sphere.rings           = 9
-	_ball_mesh.mesh = sphere
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color           = Color(1.00, 0.95, 0.55)
-	mat.emission_enabled       = true
-	mat.emission               = Color(1.00, 0.55, 0.10)
-	mat.emission_energy_multiplier = 0.6
-	_ball_mesh.material_override = mat
-	add_child(_ball_mesh)
+	var mi := MeshInstance3D.new()
+	mi.mesh = sphere
+	_ball_mat = StandardMaterial3D.new()
+	_ball_mat.albedo_color               = Color(1.00, 0.95, 0.55)
+	_ball_mat.emission_enabled           = true
+	_ball_mat.emission                   = Color(1.00, 0.55, 0.10)
+	_ball_mat.emission_energy_multiplier = 0.6
+	mi.material_override = _ball_mat
+	add_child(mi)
 
-	# Trail particles: emit liên tục tại vị trí projectile, local_coords=false
-	# nên particles stay world-space khi projectile bay → tạo trail behind ball.
 	var particles := CPUParticles3D.new()
-	particles.amount                = 24
-	particles.lifetime              = 0.40
-	particles.local_coords          = false
-	particles.emitting              = true
-	particles.one_shot              = false
-	particles.gravity               = Vector3.ZERO
-	particles.initial_velocity_min  = 0.0
-	particles.initial_velocity_max  = 0.0
-	particles.scale_amount_min      = 0.6
-	particles.scale_amount_max      = 1.0
-	# Curve scale từ 1 → 0 để particle co lại dần (fake fade)
+	particles.amount               = 24
+	particles.lifetime             = 0.40
+	particles.local_coords         = false
+	particles.emitting             = true
+	particles.one_shot             = false
+	particles.gravity              = Vector3.ZERO
+	particles.initial_velocity_min = 0.0
+	particles.initial_velocity_max = 0.0
+	particles.scale_amount_min     = 0.6
+	particles.scale_amount_max     = 1.0
 	var scale_curve := Curve.new()
 	scale_curve.add_point(Vector2(0.0, 1.0))
 	scale_curve.add_point(Vector2(1.0, 0.0))
@@ -83,34 +140,8 @@ func _ready() -> void:
 	particles.mesh         = trail_sphere
 	add_child(particles)
 
-	# Đặt position khởi đầu = đầu seg đầu tiên
-	if segs.size() > 0:
-		var s : Array = segs[0]
-		position = s[0]
-	_ready_called = true
-
-func _process(delta: float) -> void:
-	if not _ready_called: return
-	if segs.is_empty():
-		emit_signal("projectile_finished", hit_hexes)
-		queue_free()
-		return
-	if _seg_idx >= segs.size():
-		emit_signal("projectile_finished", hit_hexes)
-		queue_free()
-		return
-
-	var seg : Array  = segs[_seg_idx]
-	var seg_start : Vector3 = seg[0]
-	var seg_end   : Vector3 = seg[1]
-	var seg_len   : float   = seg_start.distance_to(seg_end)
-	if seg_len < 0.001:
-		_seg_idx     += 1
-		_seg_progress = 0.0
-		return
-	_seg_progress += speed * delta
-	var t : float = clampf(_seg_progress / seg_len, 0.0, 1.0)
-	position = seg_start.lerp(seg_end, t)
-	if _seg_progress >= seg_len:
-		_seg_idx     += 1
-		_seg_progress = 0.0
+func _set_supercharged_visuals() -> void:
+	if _ball_mat == null: return
+	_ball_mat.albedo_color               = Color(1.0, 0.15, 0.10)
+	_ball_mat.emission                   = Color(1.0, 0.10, 0.00)
+	_ball_mat.emission_energy_multiplier = 2.0

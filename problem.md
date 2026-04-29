@@ -1,4 +1,4 @@
-1) Bomb is not doing damage.
+
 2) Sonny can't redirect the shot anymore
 3) Timing attack with bar is just for now. We will need it to be timed with animation (for melee) and projectile traveling (with ranged attack later)
 4) Sonny attack is not pushing back.

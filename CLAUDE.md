@@ -28,9 +28,9 @@ All scripts and scenes live flat in the project root. `main.tscn` is the entry s
 
 **mike_timing_bar.gd** — Draw Shot timing (3 steps: aim mode → lock direction → drag+release). Ball oscillates sinusoidally; drag shifts center. Perfect ±0.04, hit ±0.08. Emits `timing_resolved(result)`.
 
-**bounce.gd** (`BounceTracer` RefCounted class) — Stateless 3D ray tracer on the XZ plane. Pre-computes projectile paths with exponential speed decay + wall/column/entity reflection. `stop_on_hit=false` so bounced projectiles can hit multiple enemies. Returns `{segs, hit_hexes}`. Used by both live projectile launch and Mike's aim preview.
+**bounce.gd** (`BounceTracer3D` RefCounted class) — Simulation-only ray tracer used exclusively for Mike's **aim preview**. Runs the same physics (exponential decay, wall/column/entity bounce) as the real projectile to guarantee preview matches flight path. Returns `{segs, hit_hexes}`. No longer used for actual projectile firing.
 
-**projectile.gd** — `Node3D` sphere mesh with emission + CPUParticles3D trail. Animates along pre-computed segments from `BounceTracer`. Emits `projectile_finished(hit_hexes)` when done. Visual only — all collision logic is in main.gd.
+**projectile.gd** (`Projectile3D` Node3D) — Real-time physics projectile. Moves in `_process()` with exponential speed decay (`DECAY_RATE = 0.85`, `MIN_SPEED = 0.54`). Properties: `proj_speed`, `proj_direction`, `proj_damage`, `negative_bounce`, `owner_node` (null = god-owned), `uses_decay`, `redirect_count`, `is_supercharged`. API: `bounce_off_surface(normal)`, `redirect_to(dir)`, `die()`. Collision detection and reaction logic lives in `main.gd`. Emits `projectile_died()` on death.
 
 **aim_overlay.gd** — Draws Mike's 3D trajectory preview (BoxMesh segments stretched + rotated via `atan2`). First segment darker blue, bounces lighter + lower alpha. Updated each mouse-move during aim mode.
 
@@ -43,7 +43,8 @@ All scripts and scenes live flat in the project root. `main.tscn` is the entry s
 - `ACTION_DELAY = 0.5s` between sequential enemy actions
 - `TWEEN_SPEED = 0.18s` for movement animation
 - Enemy attack reaction windows: `perfect_window = 0.20s`, `ok_window = 0.40s`
-- Projectile: `LAUNCH_SPEED = 18.0`, `DECAY_RATE = 0.85` (exponential), `MIN_SPEED = 1.0`
+- Projectile: `LAUNCH_SPEED = 18.0`, `DECAY_RATE = 0.85` (exponential), `MIN_SPEED = 0.54` (= 3% of launch), `NEG_BOUNCE = 5.0`
+- Enemy projectile speeds: `SLOW = 5.0`, `NORMAL = 8.0`, `FAST = 14.0` (fixed, no decay, `negative_bounce = 9999`)
 - Bomb: `BOMB_FUSE_TURNS = 2`, `BOMB_AOE_DAMAGE = 2`, `SONNY_BOMBS_PER_FLOOR = 1`
 - Grapple: `MIKE_GRAPPLES_PER_FLOOR = 2`
 - Floor progression: 5 floors, `FLOOR_SCENARIOS` array in main.gd (data-driven)
@@ -85,9 +86,9 @@ DEAD        → (modal click/ENTER) → restart from floor 0
 
 **Perfection (cockiness):** 0–10 (doubled to 0–20 with `too_easy` passive). Increases on perfect timing/dodge; resets to 0 on missed attack or taking real damage. Drives the HYPE bar in HUD.
 
-**Enemy attack dicts** (routed by main.gd): `{ range, damage, aoe, hits, speed, perfect_window, ok_window, dual_bar, speed_mults, hit_details }`. All attacks currently trigger DodgeBar regardless of range.
+**Enemy attack dicts** (routed by main.gd): `{ range, damage, aoe, hits, speed, perfect_window, ok_window, dual_bar, speed_mults, hit_details }`. Melee (`range == 1`) → DodgeBar. Ranged (`range > 1`) → real-time projectile via `_fire_enemy_projectile()`.
 
-**Projectile system (Mike Draw Shot):** `_fire_bouncing_projectile()` uses BounceTracer to pre-compute the full 3D path (XZ plane), spawns `Projectile3D` to animate it, then resolves damage via `projectile_finished` signal. SPACE during a contact window triggers reaction — Sonny redirects (up to 3 times; 3rd = supercharge AoE), Mike dodges/counters. Supercharged projectile cannot be dodged.
+**Projectile system:** All projectiles use `Projectile3D` with real-time `_process()` physics. `_fire_projectile(owner, start, dir, damage, uses_decay, neg_bounce, speed)` is the entry point. Collision detection in `_process_projectiles()` → `_check_proj_wall/column/characters()`. Player contacts open a ±0.4s SPACE reaction window in `_handle_player_proj_contact_async()`. Sonny: perfect → `redirect_to(mouse_dir)` (god-owned, speed bonus, redirect_count++; at 3 → supercharged). Mike: perfect → catch projectile data into `_mike_caught[]` (max 2), fires on next Draw Shot. OK → pass-through. Miss → take damage + bounce. Supercharged explosion at `redirect_count == 3`: AoE 2, `damage+1` at impact tile.
 
 **Status effects:** Bleed (stacks, ticks each player turn) and Disarm (turns remaining, blocks attack) are defined. Armor mitigation exists in `take_damage()` but armor is never inflicted in current code.
 
@@ -113,7 +114,7 @@ Neighbor offsets use parity (even vs odd column). This math is duplicated in ene
 
 ## Test harness
 
-`main_test.tscn` / `main_test.gd` were removed during the 3D port (they extended the 2D `main.gd`). There is currently no automated test scene. Use the in-game debug toggle (D key) and floor scenarios in `FLOOR_SCENARIOS` to configure specific combat setups.
+`main_test.tscn` / `main_test.gd` — press F6 to run. Edit `ACTIVE_SCENARIO` in `main_test.gd` to pick a scenario (`"basic"`, `"bomb_test"`, `"archer_test"`, `"assassin_test"`, `"all_types"`, `"empty"`). Press **R** in-game to reload the current scenario. Floor clear loops back to same scenario instead of transitioning.
 
 ## Workflow notes
 

@@ -14,6 +14,33 @@ nhóm theo mốc (Mốc N) và loại thay đổi.
 Toàn bộ branch chuyển game từ 2D Node2D sang 3D Node3D, giữ 100% gameplay
 mechanics, swap visual sang model `.glb` thật cho 2 nhân vật.
 
+### Polish + bug fixes (2026-04-29)
+
+**Projectile system**
+- Bounce normal: simplified to hex-center radial (`pos − hex_center`), removed inscribed-circle and hex-edge approaches
+- Aim preview now includes Sonny in entity dict → preview shows trajectory bouncing off him
+- Sonny can redirect **any** projectile, including enemy ones; normalises `neg_bounce` / `uses_decay` / speed before `redirect_to` so physics stay correct
+- Fix crash: `advance_attack` on freed enemy after `await proj.projectile_died` — added `is_instance_valid` guard
+
+**Input + aim mode**
+- Mike aim mode (Q) owns all LMB clicks — clicking Sonny commits shot direction, does not switch character
+- Tab character switching disabled while aim mode or timing bar is active
+- RMB cancels aim mode and refunds the shot
+
+**Sonny Q attack**
+- Charge bar can now target Mike (click Mike tile while in `sonny_attack_mode`)
+
+**Mike W — Grapple**
+- Added grapple preview line (reuses AimOverlay3D, single segment to first entity in path)
+- Pull distance increased 1 → 3 hexes (greedy fallback: tries 3, then 2, then 1)
+
+**Test harness (`main_test.gd`)**
+- Rewrote with documented header (grid size, spawn locations, all enemy types + stats)
+- Scenarios support `"columns"` (impassable) and `"fire_pits"` keys
+- Added scenarios: `dummy_range`, `grapple_test`, `terrain_test`
+
+---
+
 ### Prune unused assets (2026-04-28)
 
 **chore:** giảm dung lượng project và file `.exe` xuất ra.
