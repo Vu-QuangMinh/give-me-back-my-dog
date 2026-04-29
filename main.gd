@@ -43,7 +43,8 @@ const GRID_COLS    : int   = 12
 const GRID_ROWS    : int   = 8
 const GROUND_Y     : float = 0.2   # = HexTile.TILE_HEIGHT (mặt trên tile, nơi entities đứng)
 const TWEEN_SPEED  : float = 0.18  # giây cho 1 lần move smooth
-const ACTION_DELAY : float = 0.5   # giây giữa các action liên tiếp của enemy
+const ACTION_DELAY   : float = 0.5   # giây giữa các action liên tiếp của enemy
+const CHARGE_SPEED   : float = 8.0   # bulldozer world-units/sec during charge
 
 # Mốc 6.3: DodgeBar minigame
 const DodgeBarScene  = preload("res://dodge_bar.tscn")
@@ -197,6 +198,8 @@ var mike_aim_overlay       : Node    = null   # AimOverlay3D — preview project
 
 # ─── Projectile runtime state ────────────────────────────────
 var active_projectiles  : Array      = []    # Array[Projectile3D]
+var _bz_lock_lines      : Dictionary = {}    # bz instance_id → MeshInstance3D
+var _entity_tweens      : Dictionary = {}    # entity instance_id → Tween
 var _proj_last_col_hex  : Dictionary = {}    # instance_id → Vector2i (last column bounced)
 var _proj_last_char_hex : Dictionary = {}    # instance_id → Vector2i (last char hex entered)
 var _proj_prev_pos      : Dictionary = {}    # instance_id → Vector3  (world pos previous frame)
@@ -303,6 +306,22 @@ func _from_cube_f(c: Vector3) -> Vector2i:
 	var col : int = int(c.x)
 	var row : int = int(c.z) + (col - (col & 1)) / 2
 	return Vector2i(col, row)
+
+func _to_cube_i(col: int, row: int) -> Vector3i:
+	var x := col
+	var z := row - (col - (col & 1)) / 2
+	return Vector3i(x, -x - z, z)
+
+func _from_cube_i(cube: Vector3i) -> Vector2i:
+	var col := cube.x
+	var row := cube.z + (col - (col & 1)) / 2
+	return Vector2i(col, row)
+
+func _cube_rotate_60_cw(d: Vector3i) -> Vector3i:
+	return Vector3i(-d.z, -d.x, -d.y)
+
+func _cube_rotate_60_ccw(d: Vector3i) -> Vector3i:
+	return Vector3i(-d.y, -d.z, -d.x)
 
 func _cube_round(c: Vector3) -> Vector3:
 	var rx : float = round(c.x)
@@ -951,11 +970,15 @@ func _can_attack_target(from_col: int, from_row: int, to_col: int, to_row: int) 
 	return d == 1
 
 func _move_entity_smooth(entity: Node, target_col: int, target_row: int) -> void:
-	var target_pos := entity_position(target_col, target_row)
-	var tween      := create_tween()
+	var target_pos : Vector3 = entity_position(target_col, target_row)
+	var eid : int = entity.get_instance_id()
+	if eid in _entity_tweens and is_instance_valid(_entity_tweens[eid]):
+		_entity_tweens[eid].kill()
+	var tween : Tween = create_tween()
 	tween.set_ease(Tween.EASE_OUT)
 	tween.set_trans(Tween.TRANS_CUBIC)
 	tween.tween_property(entity, "position", target_pos, TWEEN_SPEED)
+	_entity_tweens[eid] = tween
 
 func _move_player(dest: Vector2i) -> void:
 	var current_player = players[current_player_index]
@@ -1390,7 +1413,12 @@ func _fire_enemy_projectile(enemy: Node, target_idx: int, attack: Dictionary) ->
 		"slow":   PROJ_ENEMY_SPEED_SLOW,
 		"fast":   PROJ_ENEMY_SPEED_FAST,
 	}.get(speed_key, PROJ_ENEMY_SPEED_NORMAL)
-	return _fire_projectile(enemy, start, dir, dmg, false, 9999.0, spd)
+	var proj : Projectile3D = _fire_projectile(enemy, start, dir, dmg, false, 9999.0, spd)
+	var stacks := int(attack.get("poison_stacks", 0))
+	if stacks > 0:
+		proj.proj_poison_stacks = stacks
+		proj.paint_poison()
+	return proj
 
 # Fire Mike's caught projectiles 0.3s apart in the shot direction (background).
 func _fire_mike_caught_projectiles_async(shooter: Node, direction: Vector3) -> void:
@@ -1500,6 +1528,11 @@ func _handle_enemy_proj_hit(proj: Projectile3D, enemy: Node) -> void:
 	enemy.take_damage(proj.proj_damage)
 	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
 		"-%d" % int(proj.proj_damage), Color(1.0, 0.55, 0.30))
+	var poison := proj.consume_poison()
+	if poison > 0:
+		enemy.poison_stacks += poison
+		_spawn_damage_popup(enemy.position + Vector3(0, 2.4, 0),
+			"POISON x%d" % enemy.poison_stacks, Color(0.30, 0.85, 0.20))
 	if enemy.hp <= 0:
 		_kill_enemy(enemy)
 	elif hud != null:
@@ -1607,6 +1640,12 @@ func _handle_player_proj_contact_async(proj: Projectile3D, player_idx: int) -> v
 				phase = prev_phase
 				return
 			_apply_damage_to_player(player_idx, int(proj.proj_damage), "hit")
+			var poison := proj.consume_poison()
+			if poison > 0:
+				var pp = players[player_idx]
+				pp.poison_stacks += poison
+				_spawn_damage_popup(pp.position + Vector3(0, 2.4, 0),
+					"POISON x%d" % pp.poison_stacks, Color(0.30, 0.85, 0.20))
 			if is_instance_valid(proj) and not proj._dead:
 				var p_center : Vector3 = hex_to_world(player_positions[player_idx].x, player_positions[player_idx].y)
 				var n : Vector3 = Vector3(proj.position.x - p_center.x, 0.0, proj.position.z - p_center.z)
@@ -1914,6 +1953,32 @@ func _push_enemy(enemy: Node, from_col: int, from_row: int, push_value: int) -> 
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
 
+# Push a player by giving the "from" hex so direction = dest - player_hex.
+func _push_player(player_idx: int, from_col: int, from_row: int, push_value: int) -> void:
+	if push_value <= 0: return
+	var p = players[player_idx]
+	var cube_from := _to_cube_i(from_col, from_row)
+	var cube_self := _to_cube_i(p.grid_col, p.grid_row)
+	var cube_dest : Vector3i = cube_self + (cube_self - cube_from)
+	var dest := _from_cube_i(cube_dest)
+	if not is_valid_and_passable(dest.x, dest.y):
+		_apply_damage_to_player(player_idx, push_value, "hit")
+		return
+	var blocker_e : Node = _get_enemy_at(dest)
+	var blocker_p : int  = _get_player_at(dest)
+	if blocker_e != null or blocker_p >= 0:
+		_apply_damage_to_player(player_idx, 1, "hit")
+		if blocker_e != null:
+			blocker_e.take_damage(1)
+			_spawn_damage_popup(blocker_e.position + Vector3(0, 1.8, 0), "-1", Color(1.0, 0.3, 0.3))
+			if is_instance_valid(blocker_e) and blocker_e.hp <= 0:
+				_kill_enemy(blocker_e)
+		return
+	player_positions[player_idx] = dest
+	p.grid_col = dest.x
+	p.grid_row = dest.y
+	_move_entity_smooth(p, dest.x, dest.y)
+
 func _kill_enemy(enemy: Node) -> void:
 	if enemy.enemy_type == "bomb":
 		_explode_bomb(enemy)   # runs as background coroutine
@@ -2104,6 +2169,23 @@ func _run_enemy_turn() -> void:
 			Color(1.0, 0.30, 0.30), _restart_from_floor_zero)
 		return
 
+	# Tick poison stacks for each living player.
+	for i in range(players.size()):
+		var p = players[i]
+		if p.hp > 0 and p.poison_stacks > 0:
+			var dmg : int = p.poison_stacks
+			p.poison_stacks -= 1
+			_apply_damage_to_player(i, dmg, "hit")
+			_spawn_damage_popup(p.position + Vector3(0, 2.4, 0),
+				"POISON -%d HP" % dmg, Color(0.40, 0.85, 0.20))
+	if _all_players_dead():
+		phase = Phase.DEAD
+		_refresh_debug()
+		await get_tree().create_timer(0.6).timeout
+		_show_modal("GAME OVER", "All heroes fallen. Click to restart",
+			Color(1.0, 0.30, 0.30), _restart_from_floor_zero)
+		return
+
 	# Reset cho round player mới
 	for p in players:
 		if p.hp > 0:
@@ -2129,6 +2211,16 @@ func _run_enemy_turn() -> void:
 
 func _run_enemy_actions(enemy: Node) -> void:
 	enemy.tick_turn()
+	var poison_dmg : int = enemy.tick_poison()
+	if poison_dmg > 0:
+		enemy.take_damage(poison_dmg)
+		_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
+			"POISON -%d HP" % poison_dmg, Color(0.30, 0.85, 0.20))
+		if hud != null:
+			hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
+		if enemy.hp <= 0:
+			_kill_enemy(enemy)
+			return
 	enemy.has_attacked_this_turn = false
 	for i in range(enemy.actions_per_turn):
 		if enemy.hp <= 0: return
@@ -2142,6 +2234,15 @@ func _run_enemy_actions(enemy: Node) -> void:
 			"attack":
 				await _enemy_perform_attack(enemy, target_idx)
 				await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+			"charge":
+				await _bulldozer_charge_async(enemy)
+				return  # charge consumed both actions
+			"lock_on":
+				_bulldozer_try_lock(enemy)
+				if enemy.lock_target_idx < 0:
+					# Lock failed — spend remaining action moving
+					_enemy_move_toward(enemy, target_idx)
+					await get_tree().create_timer(ACTION_DELAY).timeout
 			"move":
 				_enemy_move_toward(enemy, target_idx)
 				await get_tree().create_timer(ACTION_DELAY).timeout
@@ -2192,6 +2293,8 @@ func _enemy_perform_attack(enemy: Node, target_idx: int) -> void:
 		# Ranged: fire a real projectile; player reacts with SPACE in real-time.
 		var proj = _fire_enemy_projectile(enemy, target_idx, attack)
 		await proj.projectile_died
+		if attack.get("single_use", false) and is_instance_valid(enemy):
+			enemy.ranged_used = true
 	else:
 		# Melee: spawn DodgeBar.
 		await _trigger_dodge_bar(enemy, target_idx, attack)
@@ -2216,20 +2319,20 @@ func _telegraph_attack(target_idx: int) -> void:
 
 func _trigger_dodge_bar(enemy: Node, target_idx: int, attack: Dictionary) -> void:
 	phase = Phase.DODGE_PHASE
-	var bar = DodgeBarScene.instantiate()
-	# Note: enemy preset có "perfect_window"/"ok_window" là TIME windows (sec),
-	# không phải bar-fractions. 2D version cũng không truyền cho dodge_bar →
-	# dùng defaults ZONE_PERFECT=0.04 (4% bar half-width) / ZONE_DODGE=0.08
-	# (8%) cho zone size hợp lý.
-	bar.setup(enemy.dodge_line, 1.0)
-	# Attach vào camera với local transform → bar luôn ở trước mặt người chơi.
-	# Z=-1.2 (gần), Y=-0.18 (chỉ dưới center). Bar sau scale 0.2 + tilt 25°
-	# hiện ~20% bề rộng view.
-	camera.add_child(bar)
-	bar.position = Vector3(0.0, -0.18, -1.2)
-	var result : String = await bar.bar_finished
-	var dmg : int = int(attack.get("damage", 1))
-	_apply_damage_to_player(target_idx, dmg, result)
+	var dual      : bool  = bool(attack.get("dual_bar", false))
+	var mults     : Array = attack.get("speed_mults", [])
+	var lines     : Array = attack.get("timing_lines", [])
+	var dmg       : int   = int(attack.get("damage", 1))
+	var bar_count : int   = 2 if dual else 1
+	for i in bar_count:
+		var bar   = DodgeBarScene.instantiate()
+		var line  : float = lines[i] if i < lines.size() else enemy.dodge_line
+		var mult  : float = mults[i] if i < mults.size() else 1.0
+		bar.setup(line, mult)
+		camera.add_child(bar)
+		bar.position = Vector3(0.0, -0.18, -1.2)
+		var result : String = await bar.bar_finished
+		_apply_damage_to_player(target_idx, dmg, result)
 	phase = Phase.ENEMY_TURN
 
 func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") -> void:
@@ -2248,6 +2351,10 @@ func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") 
 			_spawn_damage_popup(head_pos, "-%d HP" % dmg, Color(1.0, 0.30, 0.30))
 			if p.hp <= 0:
 				_play_death_animation(p, false)   # ẩn capsule có animation
+				# Clear any Bulldozer lock targeting this player
+				for bz in enemies:
+					if is_instance_valid(bz) and bz.lock_target_idx == target_idx:
+						bz.lock_target_idx = -1
 	# HUD update
 	if hud != null:
 		hud.set_hp(player_names[target_idx], p.hp, p.max_hp)
@@ -2255,6 +2362,255 @@ func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") 
 		if current_player_index < players.size():
 			var cur = players[current_player_index]
 			hud.set_hype_from_perfection(cur.perfection, cur.perfection_cap)
+
+# ═══════════════════════════════════════════════════════════
+#  BULLDOZER — lock-on + charge
+# ═══════════════════════════════════════════════════════════
+
+# Persistent red line from each locked Bulldozer to its target, updated every frame.
+func _update_bz_lock_lines() -> void:
+	var active_ids : Dictionary = {}
+	for bz in enemies:
+		if not is_instance_valid(bz): continue
+		if bz.enemy_type != "bulldozer": continue
+		if bz.lock_target_idx < 0 or bz.lock_target_idx >= players.size(): continue
+		var p = players[bz.lock_target_idx]
+		if p.hp <= 0: continue
+		var bz_id : int = bz.get_instance_id()
+		active_ids[bz_id] = true
+		if bz_id not in _bz_lock_lines:
+			var mi := MeshInstance3D.new()
+			var mesh := BoxMesh.new()
+			mesh.size = Vector3(1.0, 0.04, 0.04)
+			mi.mesh = mesh
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color               = Color(1.0, 0.08, 0.08, 0.85)
+			mat.transparency               = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.shading_mode               = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mi.material_override = mat
+			add_child(mi)
+			_bz_lock_lines[bz_id] = mi
+		var line : MeshInstance3D = _bz_lock_lines[bz_id]
+		var from_w : Vector3 = Vector3(bz.position.x, GROUND_Y + 0.4, bz.position.z)
+		var to_w   : Vector3 = Vector3(p.position.x,  GROUND_Y + 0.4, p.position.z)
+		var diff   : Vector3 = to_w - from_w
+		var length : float   = diff.length()
+		if length > 0.01:
+			line.position  = (from_w + to_w) * 0.5
+			line.scale     = Vector3(length, 1.0, 1.0)
+			line.rotation  = Vector3(0.0, -atan2(diff.z, diff.x), 0.0)
+			line.visible   = true
+		else:
+			line.visible = false
+	# Remove lines for bulldozers that no longer have a lock.
+	for id in _bz_lock_lines.keys():
+		if id not in active_ids:
+			_bz_lock_lines[id].queue_free()
+			_bz_lock_lines.erase(id)
+
+# Scan for the nearest player within 4 hexes WITH line-of-sight.
+# Sets enemy.lock_target_idx if found; leaves it -1 otherwise.
+func _bulldozer_try_lock(enemy: Node) -> void:
+	var best_idx : int = -1
+	var best_d   : int = 999
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		var d : int = _hex_dist(enemy.grid_col, enemy.grid_row,
+								players[i].grid_col, players[i].grid_row)
+		if d <= 4 and d < best_d \
+				and _has_line_of_sight(enemy.grid_col, enemy.grid_row,
+									   players[i].grid_col, players[i].grid_row):
+			best_d   = d
+			best_idx = i
+	enemy.lock_target_idx = best_idx
+
+# SPACE parry window for Bulldozer charge contact (same timing as projectile §5B).
+# Returns "perfect", "ok", or "miss".
+func _bulldozer_parry_async() -> String:
+	var contact_t : float = Time.get_ticks_msec() / 1000.0
+	var pre_rel   : float = contact_t - _space_pressed_at
+	if pre_rel >= 0.0 and pre_rel <= 0.20: return "perfect"
+	if pre_rel >= 0.0 and pre_rel <= 0.40: return "ok"
+	var old_press : float = _space_pressed_at
+	var waited    : float = 0.0
+	while waited < 0.40:
+		await get_tree().process_frame
+		waited += get_process_delta_time()
+		if _space_pressed_at != old_press:
+			var post_rel : float = _space_pressed_at - contact_t
+			if post_rel >= 0.0 and post_rel <= 0.20: return "perfect"
+			if post_rel >= 0.0 and post_rel <= 0.40: return "ok"
+			old_press = _space_pressed_at
+	return "miss"
+
+# Full charge: straight-line movement toward locked target.
+func _bulldozer_charge_async(bz: Node) -> void:
+	var lock_idx : int = bz.lock_target_idx
+	if lock_idx < 0 or lock_idx >= players.size() or players[lock_idx].hp <= 0:
+		bz.lock_target_idx = -1
+		return
+
+	# "CHARGE!" telegraph label
+	var lbl := Label3D.new()
+	lbl.text             = "CHARGE!"
+	lbl.font_size        = 80
+	lbl.pixel_size       = 0.0013
+	lbl.outline_size     = 8
+	lbl.outline_modulate = Color(0.0, 0.0, 0.0, 1.0)
+	lbl.modulate         = Color(1.0, 0.08, 0.08)
+	lbl.no_depth_test    = true
+	lbl.billboard        = BaseMaterial3D.BILLBOARD_ENABLED
+	lbl.position         = Vector3(0.0, 2.4, 0.0)
+	bz.add_child(lbl)
+	await get_tree().create_timer(0.5).timeout
+	if is_instance_valid(lbl): lbl.queue_free()
+	if not is_instance_valid(bz) or bz.hp <= 0: return
+
+	# Snapshot charge direction from start toward target (straight world-space line).
+	var target_p         = players[lock_idx]
+	var bz_start         : Vector3  = bz.position
+	var target_w         : Vector3  = hex_to_world(target_p.grid_col, target_p.grid_row)
+	target_w.y = bz_start.y
+	var raw_dir          : Vector3  = target_w - bz_start
+	raw_dir.y = 0.0
+	var total_dist       : float    = raw_dir.length()
+	if total_dist < 0.01: return
+	var dir              : Vector3  = raw_dir.normalized()
+
+	# Nearest cube hex direction (for ±60° push math)
+	var step_path        : Array    = _hex_line(bz.grid_col, bz.grid_row,
+												 target_p.grid_col, target_p.grid_row)
+	var charge_dir_cube  : Vector3i = Vector3i(1, -1, 0)  # fallback
+	if step_path.size() >= 2:
+		charge_dir_cube = _to_cube_i(step_path[1].x, step_path[1].y) \
+						- _to_cube_i(step_path[0].x, step_path[0].y)
+
+	# Kill any in-progress movement tween so it won't fight with direct position writes.
+	var bz_eid : int = bz.get_instance_id()
+	if bz_eid in _entity_tweens and is_instance_valid(_entity_tweens[bz_eid]):
+		_entity_tweens[bz_eid].kill()
+		_entity_tweens.erase(bz_eid)
+
+	var traveled         : float      = 0.0
+	var prev_hex         : Vector2i   = Vector2i(bz.grid_col, bz.grid_row)
+	var side_counter     : int        = 0
+	var parried_players  : Dictionary = {}
+	var stopped          : bool       = false
+
+	while traveled < total_dist and not stopped \
+			and is_instance_valid(bz) and bz.hp > 0:
+		await get_tree().process_frame
+		traveled = minf(traveled + CHARGE_SPEED * get_process_delta_time(), total_dist)
+		bz.position = bz_start + dir * traveled
+
+		var cur_hex : Vector2i = world_to_hex(bz.position)
+		if cur_hex.x < 0: cur_hex = prev_hex  # between hexes — stay on last known
+
+		if cur_hex == prev_hex: continue
+		prev_hex = cur_hex
+		# NOTE: bz.grid_col/row updated only when bz actually enters the hex (below).
+
+		# Column blocks charge — bz bounces back, takes damage.
+		if cur_hex in column_tiles:
+			bz.take_damage(1)
+			_spawn_damage_popup(bz.position + Vector3(0, 1.8, 0), "-1", Color(1.0, 0.3, 0.3))
+			if bz.hp <= 0: _kill_enemy(bz)
+			stopped = true
+			break
+
+		# Locked target's hex — parry window, damage on miss, push along charge dir.
+		if cur_hex == player_positions[lock_idx]:
+			var result : String = "miss"
+			if lock_idx not in parried_players:
+				parried_players[lock_idx] = true
+				var pp : Phase = phase
+				phase = Phase.DODGE_PHASE
+				result = await _bulldozer_parry_async()
+				phase = pp
+			if result == "miss":
+				_apply_damage_to_player(lock_idx, 1, "hit")
+			var fp : Vector2i = _from_cube_i(_to_cube_i(cur_hex.x, cur_hex.y) - charge_dir_cube)
+			_push_player(lock_idx, fp.x, fp.y, 1)
+			# Only enter if push succeeded (player vacated the hex).
+			if player_positions[lock_idx] != cur_hex:
+				bz.grid_col = cur_hex.x
+				bz.grid_row = cur_hex.y
+			stopped = true
+			break
+
+		# _get_enemy_at uses grid_col/row; since we haven't updated bz yet, it won't find bz.
+		var hit_e : Node = _get_enemy_at(cur_hex)
+
+		# Immovable enemy blocks charge.
+		if hit_e != null and hit_e.immovable:
+			bz.take_damage(1)
+			_spawn_damage_popup(bz.position + Vector3(0, 1.8, 0), "-1", Color(1.0, 0.3, 0.3))
+			if bz.hp <= 0: _kill_enemy(bz)
+			stopped = true
+			break
+
+		# Non-target enemy — 1 dmg, push ±60°, enter if hex clears.
+		if hit_e != null:
+			hit_e.take_damage(1)
+			_spawn_damage_popup(hit_e.position + Vector3(0, 1.8, 0), "-1", Color(1.0, 0.55, 0.30))
+			if hit_e.hp <= 0: _kill_enemy(hit_e)
+			var pd : Vector3i = _cube_rotate_60_ccw(charge_dir_cube) if side_counter % 2 == 0 \
+								 else _cube_rotate_60_cw(charge_dir_cube)
+			side_counter += 1
+			if is_instance_valid(hit_e) and hit_e.hp > 0:
+				var fp : Vector2i = _from_cube_i(_to_cube_i(cur_hex.x, cur_hex.y) - pd)
+				_push_enemy(hit_e, fp.x, fp.y, 1)
+			if _get_enemy_at(cur_hex) != null or _get_player_at(cur_hex) >= 0:
+				bz.take_damage(1)
+				_spawn_damage_popup(bz.position + Vector3(0, 1.8, 0), "-1", Color(1.0, 0.3, 0.3))
+				if bz.hp <= 0: _kill_enemy(bz)
+				stopped = true
+				break
+			bz.grid_col = cur_hex.x
+			bz.grid_row = cur_hex.y
+			continue
+
+		# Non-locked player — parry window, 1 dmg on miss, push ±60°.
+		var hit_p : int = _get_player_at(cur_hex)
+		if hit_p >= 0:
+			var result : String = "miss"
+			if hit_p not in parried_players:
+				parried_players[hit_p] = true
+				var pp : Phase = phase
+				phase = Phase.DODGE_PHASE
+				result = await _bulldozer_parry_async()
+				phase = pp
+			if result == "miss":
+				_apply_damage_to_player(hit_p, 1, "hit")
+			var pd : Vector3i = _cube_rotate_60_ccw(charge_dir_cube) if side_counter % 2 == 0 \
+								 else _cube_rotate_60_cw(charge_dir_cube)
+			side_counter += 1
+			var fp : Vector2i = _from_cube_i(_to_cube_i(cur_hex.x, cur_hex.y) - pd)
+			_push_player(hit_p, fp.x, fp.y, 1)
+			if _get_player_at(cur_hex) >= 0 or _get_enemy_at(cur_hex) != null:
+				bz.take_damage(1)
+				_spawn_damage_popup(bz.position + Vector3(0, 1.8, 0), "-1", Color(1.0, 0.3, 0.3))
+				if bz.hp <= 0: _kill_enemy(bz)
+				stopped = true
+				break
+			bz.grid_col = cur_hex.x
+			bz.grid_row = cur_hex.y
+			continue
+
+		# Empty passable hex — enter it.
+		bz.grid_col = cur_hex.x
+		bz.grid_row = cur_hex.y
+
+	# Snap to the center of whichever hex bz ended up in.
+	if is_instance_valid(bz) and bz.hp > 0:
+		var snap_pos : Vector3 = entity_position(bz.grid_col, bz.grid_row)
+		var snap_tw  : Tween   = create_tween()
+		snap_tw.set_ease(Tween.EASE_OUT)
+		snap_tw.tween_property(bz, "position", snap_pos, 0.12)
+		_entity_tweens[bz_eid] = snap_tw
+		await snap_tw.finished
+		_update_valid_moves()
+		_refresh_tile_colors()
 
 func _find_nearest_player_to(enemy: Node) -> int:
 	var best_idx : int = -1
@@ -2492,6 +2848,7 @@ const CAM_PAN_BOUND : float = 25.0   # giới hạn anchor để không bay xa m
 
 func _process(delta: float) -> void:
 	_process_projectiles(delta)
+	_update_bz_lock_lines()
 	var pan := Vector3.ZERO
 	if Input.is_key_pressed(KEY_UP):    pan.z -= 1.0
 	if Input.is_key_pressed(KEY_DOWN):  pan.z += 1.0

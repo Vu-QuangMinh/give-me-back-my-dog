@@ -5,7 +5,7 @@ class_name Enemy
 #  BEHAVIOR ENUM
 # ═══════════════════════════════════════════════════════════════════
 
-enum Behavior { AGGRESSIVE, RANGER, DUMMY }
+enum Behavior { AGGRESSIVE, RANGER, DUMMY, BULLDOZER }
 
 # ═══════════════════════════════════════════════════════════════════
 #  ENEMY PRESETS
@@ -20,9 +20,12 @@ enum Behavior { AGGRESSIVE, RANGER, DUMMY }
 #    speed          String "" for melee; "slow" / "medium" / "fast" for ranged
 #    perfect_window float  seconds from timing line (melee only)
 #    ok_window      float  seconds from timing line (melee only)
-#    dual_bar       bool   true → spawn two sequential dodge bars
+#    dual_bar       bool   true → spawn two sequential dodge bars (melee hits > 1)
 #    speed_mults    Array  [bar1_mult, bar2_mult] when dual_bar == true
+#    timing_lines   Array  [bar1_line, bar2_line] target positions (0–1) for dual_bar bars
 #    hit_details    Array  per-hit override dicts when hits > 1 and not identical
+#    poison_stacks  int    stacks of poison to apply on hit (ranged only)
+#    single_use     bool   true → attack can only fire once per combat
 # ═══════════════════════════════════════════════════════════════════
 
 const ENEMY_PRESETS : Dictionary = {
@@ -73,7 +76,7 @@ const ENEMY_PRESETS : Dictionary = {
 	"assassin": {
 		"enemy_type":       "assassin",
 		"display_label":    "S",
-		"max_hp":           4,
+		"max_hp":           3,
 		"actions_per_turn": 2,
 		"move_range":       2,
 		"body_color":       Color(0.50, 0.15, 0.70),
@@ -82,10 +85,30 @@ const ENEMY_PRESETS : Dictionary = {
 		"range_min":        0,
 		"range_max":        0,
 		"attacks": [
-			{ "range": 1, "damage": 1, "aoe": 1, "hits": 1, "speed": "",
+			# A1 — Poison Dagger: ranged, single-use, applies 1 poison stack on hit
+			{ "range": 6, "damage": 1, "aoe": 1, "hits": 1, "speed": "medium",
+			  "perfect_window": 0.0, "ok_window": 0.0,
+			  "dual_bar": false, "speed_mults": [], "no_bounce": true,
+			  "poison_stacks": 1, "single_use": true },
+			# A2 — Melee Combo: two sequential dodge bars, slow then fast
+			{ "range": 1, "damage": 1, "aoe": 1, "hits": 2, "speed": "",
 			  "perfect_window": 0.16, "ok_window": 0.32,
-			  "dual_bar": true, "speed_mults": [0.80, 1.30] },
+			  "dual_bar": true, "speed_mults": [0.70, 1.40],
+			  "timing_lines": [0.60, 0.75] },
 		],
+	},
+	"bulldozer": {
+		"enemy_type":       "bulldozer",
+		"display_label":    "Z",
+		"max_hp":           5,
+		"actions_per_turn": 2,
+		"move_range":       1,
+		"body_color":       Color(0.55, 0.55, 0.55),
+		"behavior":         Behavior.BULLDOZER,
+		"immovable":        false,
+		"range_min":        0,
+		"range_max":        0,
+		"attacks":          [],  # charge is handled directly in main.gd
 	},
 	"bomb": {
 		"enemy_type":       "bomb",
@@ -142,10 +165,16 @@ var grid_col               : int   = 0
 var grid_row               : int   = 0
 var dodge_line             : float = 0.0
 var bleed_stacks           : int   = 0
+var poison_stacks          : int   = 0
 var disarmed_turns         : int   = 0
 var attack_index           : int   = 0
 var has_attacked_this_turn : bool  = false
 var fuse_turns             : int   = 0   # Mốc 7: chỉ dùng cho type "bomb"
+var ranged_used            : bool  = false  # assassin: A1 single-use fired flag
+var lock_target_idx        : int   = -1     # bulldozer: locked player index, -1 = none
+var charge_this_turn       : bool  = false  # bulldozer: charged, skip remaining actions
+var move_done_this_turn    : bool  = false  # bulldozer: moved without lock; next = lock attempt
+var lock_attempted         : bool  = false  # bulldozer: lock attempt made this turn
 
 # ═══════════════════════════════════════════════════════════════════
 #  3D NODES (từ scene)
@@ -205,9 +234,31 @@ func plan_action(player_col: int, player_row: int,
 	var atk_range = get_current_attack().get("range", 1)
 
 	match behavior:
+		Behavior.BULLDOZER:
+			if charge_this_turn:
+				return "idle"
+			if lock_target_idx >= 0:
+				charge_this_turn = true
+				return "charge"
+			# No lock: first action = move, second = lock attempt (main.gd does LOS+dist check)
+			if move_done_this_turn:
+				lock_attempted = true
+				return "lock_on"
+			move_done_this_turn = true
+			return "move"
 		Behavior.AGGRESSIVE:
-			if dist <= atk_range:
-				return "attack"
+			if enemy_type == "assassin":
+				# A1 (ranged) first if not yet used and player is within range 6.
+				# A2 (melee dual-bar) when adjacent.
+				if not ranged_used and dist <= 6:
+					attack_index = 0
+					return "attack"
+				if dist <= 1:
+					attack_index = 1
+					return "attack"
+			else:
+				if dist <= atk_range:
+					return "attack"
 		Behavior.RANGER:
 			if dist < range_min:
 				return "move_away"
@@ -217,31 +268,46 @@ func plan_action(player_col: int, player_row: int,
 
 func best_move_toward(player_col: int, player_row: int,
 					  occupied: Dictionary, grid) -> Vector2i:
-	var neighbors = _get_neighbors(grid_col, grid_row)
-	var best      = Vector2i(-1, -1)
-	var best_dist = 999
-	for nb in neighbors:
-		if nb in occupied: continue
-		if not grid.is_valid_and_passable(nb.x, nb.y): continue
-		var d = _hex_dist(nb.x, nb.y, player_col, player_row)
+	var reachable : Array = _bfs_reachable(occupied, grid)
+	var best      : Vector2i = Vector2i(-1, -1)
+	var best_dist : int      = 999
+	for pos in reachable:
+		var d : int = _hex_dist(pos.x, pos.y, player_col, player_row)
 		if d < best_dist:
 			best_dist = d
-			best      = nb
+			best      = pos
 	return best
 
 func best_move_away(player_col: int, player_row: int,
 					occupied: Dictionary, grid) -> Vector2i:
-	var neighbors = _get_neighbors(grid_col, grid_row)
-	var best      = Vector2i(-1, -1)
-	var best_dist = -1
-	for nb in neighbors:
-		if nb in occupied: continue
-		if not grid.is_valid_and_passable(nb.x, nb.y): continue
-		var d = _hex_dist(nb.x, nb.y, player_col, player_row)
+	var reachable : Array = _bfs_reachable(occupied, grid)
+	var best      : Vector2i = Vector2i(-1, -1)
+	var best_dist : int      = -1
+	for pos in reachable:
+		var d : int = _hex_dist(pos.x, pos.y, player_col, player_row)
 		if d > best_dist:
 			best_dist = d
-			best      = nb
+			best      = pos
 	return best
+
+# BFS up to move_range steps; returns all passable non-occupied reachable tiles.
+func _bfs_reachable(occupied: Dictionary, grid) -> Array:
+	var visited  : Dictionary = { Vector2i(grid_col, grid_row): true }
+	var frontier : Array      = [Vector2i(grid_col, grid_row)]
+	var reachable : Array     = []
+	for _step in range(move_range):
+		var next : Array = []
+		for pos in frontier:
+			for nb in _get_neighbors(pos.x, pos.y):
+				if nb in visited: continue
+				if not grid.is_valid_and_passable(nb.x, nb.y): continue
+				if nb in occupied: continue
+				visited[nb] = true
+				next.append(nb)
+				reachable.append(nb)
+		frontier = next
+		if frontier.is_empty(): break
+	return reachable
 
 # ═══════════════════════════════════════════════════════════════════
 #  COMBAT
@@ -254,6 +320,16 @@ func take_damage(dmg: int) -> void:
 func tick_turn() -> void:
 	if disarmed_turns > 0:
 		disarmed_turns -= 1
+	charge_this_turn    = false
+	move_done_this_turn = false
+	lock_attempted      = false
+
+# Returns poison damage to deal this turn and decrements one stack.
+func tick_poison() -> int:
+	if poison_stacks <= 0: return 0
+	var dmg := poison_stacks
+	poison_stacks -= 1
+	return dmg
 
 # ═══════════════════════════════════════════════════════════════════
 #  HEX HELPERS

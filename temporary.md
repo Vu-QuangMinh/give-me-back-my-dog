@@ -1,3 +1,23 @@
+## 2026-04-29 — Assassin fully implemented
+
+**Changes (enemy.gd)**:
+- Assassin preset rewritten: A1 = Poison Dagger (range 6, damage 1, speed medium, poison_stacks 1, single_use true); A2 = Melee Combo (range 1, hits 2, dual_bar true, timing_lines [0.60, 0.75], speed_mults [0.70, 1.40]).
+- New attack dict keys documented: `poison_stacks`, `single_use`, `timing_lines`.
+- Added `ranged_used: bool = false` runtime state (tracks if single-use A1 has fired).
+- `plan_action()`: assassin branch prefers A1 if not `ranged_used` and player within 6 hexes; falls back to A2 if adjacent; else moves.
+
+**Changes (main.gd)**:
+- `_fire_enemy_projectile()`: passes `attack["poison_stacks"]` onto `proj.proj_poison_stacks`.
+- `_handle_player_proj_contact_async()`: on "miss", increments `player.poison_stacks` and shows a POISON popup.
+- `_trigger_dodge_bar()`: supports `dual_bar` — iterates `bar_count` bars, each with its own `timing_lines[i]` and `speed_mults[i]`.
+- `_enemy_perform_attack()`: after a `single_use` ranged attack fires, sets `enemy.ranged_used = true`.
+- `_run_enemy_turn()`: ticks player poison stacks at end of enemy turn (deal N dmg, decrement stacks, check game over).
+
+**Changes (Player.gd)**: added `var poison_stacks: int = 0`.
+**Changes (projectile.gd)**: added `var proj_poison_stacks: int = 0`.
+
+---
+
 ## 2026-04-29 — Sonny redirect works on enemy projectiles
 
 **Fix**: Enemy projectiles have `negative_bounce = 9999` and `uses_decay = false`. When Sonny redirected one, `redirect_to` added `9999 × 0.5 ≈ 5000` speed, making the ball teleport across the map and die on the next wall bounce.

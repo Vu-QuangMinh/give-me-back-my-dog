@@ -120,6 +120,7 @@ var armor   : int = 0
 
 var perfection     : int = 0
 var perfection_cap : int = 10
+var poison_stacks  : int = 0
 
 var actions_left  : int  = 2
 var has_attacked  : bool = false

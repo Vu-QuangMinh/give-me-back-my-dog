@@ -824,11 +824,9 @@ attack.range  > 1  →  ranged →  spawn projectile (no dodge bar — player re
 
 ### Hits
 
-An attack with `hits > 1` fires that many times **sequentially** on the same action. Each hit spawns its own dodge bar (melee) or its own projectile (ranged) independently.
-
-If all hits are identical, the main row is sufficient. If hits differ, a **hits table** is required beneath the attack row and the main row `damage` is left as `—`.
-
-For ranged multi-hit attacks with a delay between projectiles, specify the delay in seconds in the hits table or Special column.
+Attack with more than 1 hit fall into 2 categories:
+Range: each projectile is fired with 0.3s apart, unless specified. 
+Melee: each attack spawn its own dodge bar, the later attack dodge bar is on top of the earlier one. Later dodge bar will only start running once the earlier dodge bar is finished (regardless of player's action)
 
 ---
 
@@ -908,19 +906,100 @@ For ranged multi-hit attacks with a delay between projectiles, specify the delay
 
 ### Assassin — S (purple) — NOT YET IMPLEMENTED
 
-**HP**: 4
+**HP**: 3
 **Actions**: 2
 **Move**: 2 hexes
-**Behavior**: Aggressive. Moves toward the nearest player. Attacks if adjacent. Attacking ends turn.
+**Behavior**: Aggressive. Moves toward the nearest player. Use range attack first, then melee attack.
+
+A1: Poison dagger
+Range: 6
+hit: 1
+Damage 1
+Apply 1 stack of poison. (a stack of poison deal 1 damage, poison is stackable, each turn the number of poison stack decrease by 1)
+Projectile speed: normal
+Can only be used once a combat
+A2
+Range: Melee
+Hit: 2
+Damage: 1
+Attack twice in a row, each attach deal 1 damage. There would be 2 timing bar for each attach. First attack timing bar has the ball speed slow, timing line at 0.6. 2nd timing bar has ball speed fast and timing line at 0.75
+
+### Bulldozer — Z (gray)
+
+**HP**: 5
+**Actions**: 2
+**Move**: 1 hexes
+**Behavior**: Lock-and-charge. Telegraphed line attack with reaction window.
+
+#### Lock-on
+
+Checked **once per turn**, at the start of Bulldozer's turn, only if he has no current lock:
+
+- Scan for the **nearest player within 4 hexes** (hex distance) **with line of sight** (columns block; same `_has_line_of_sight` rule as Mike's Draw Shot).
+- If found, that player becomes the locked target. Establishing the lock costs **1 action**.
+- If no eligible player is found this turn, Bulldozer does not attempt again until next turn-start.
+- Bulldozer will move toward the nearest player when there is no lock on. Each move cost 1 action.
+
+Once locked:
+- The target **never changes** as long as they are alive — distance, LOS, and walls become irrelevant. The lock is permanent until the target dies.
+- A persistent **red line** is drawn from Bulldozer to the locked target's current hex, redrawn each frame as the target moves. Visual telegraph only — does not block movement, projectiles, or LOS.
+
+If the locked target dies (any cause), the lock clears. Bulldozer re-acquires on his next turn-start using the same rules above.
+
+#### Actions per turn
+
+Bulldozer always has **2 actions** per turn. The action a turn opens with depends on state:
+
+| State at turn start | Action 1 | Action 2 |
+|---|---|---|
+| No lock | Move 1 hex toward nearest visible player (`Behavior.AGGRESSIVE`-style move) | Attempt to lock on (scan + establish if eligible). If lock succeeds, action ends; charge waits for next turn. | If lock fail, move another hex toward the nearest visible player.
+| Has lock | Charge (see below) | Charge consumes the second action as well — he does nothing else that turn. |
+
+The intent: an unlocked Bulldozer spends his turn closing distance and acquiring; a locked Bulldozer charges immediately and uses the whole turn doing it.
+
+#### Charge
+
+Triggered at the start of Bulldozer's turn whenever a lock is active. Consumes **both actions**.
+
+The charge path is a straight hex line from Bulldozer's current hex to the locked target's **current hex** (re-aimed each turn — "sticky lock, fresh aim").
+
+Bulldozer advances one hex at a time along the path. Each hex resolves as follows:
+
+**Empty passable hex** → Bulldozer enters it. Continue.
+
+**A non-target character on the path (player or enemy)** → Deal **1 damage** and **push 1** to that character. The push direction is **NOT** the charge direction — it is the charge direction rotated **±60°** (one hex axis offset to either side of the line):
+
+- The first non-target character hit is pushed at **+60°** (left of the charge direction).
+- The second non-target character hit is pushed at **−60°** (right).
+- Subsequent hits alternate +60°, −60°, etc.
+- Push collisions follow the existing `_push_enemy` chain rules — pushed-into-wall = +1 dmg to pushee; pushed-into-character = both take 1 dmg, push transfers at value−1; etc.
+- After the push resolves, Bulldozer enters the now-empty hex and continues.
+- If the hex cannot be emptied, charge is stop, bulldozer take 1 damage
+
+**Wall edge / column / immovable enemy on path** → Bulldozer **stops in the previous hex** (last passable hex). He takes **1 damage**. Charge ends.
+
+**The locked target's hex (final hex of path)** → Push the target 1 hex along the **charge direction** (straight, NOT angled — only non-target hits use ±60°). Push uses the standard `_push_enemy` chain rules. Bulldozer then occupies the target's former hex. Charge ends.
+
+If the charge path would carry Bulldozer off the grid, he stops at the last in-bounds hex and takes 1 damage.
+
+#### Reaction — Parry
+
+When Bulldozer enters a player's hex during the charge, that player has a SPACE-press window to parry. Same timing logic as projectile reactions in §5B:
+
+- **Perfect (SPACE within ±0.2s of contact)**: 0 damage. Push still applies.
+- **OK (SPACE within ±0.2s–±0.4s)**: 0 damage. Push still applies.
+- **Miss / no press**: full damage AND push.
+
+Each character has only one parry attempt per charge — if a chain push pulls them back into the charge path, the second contact is not parry-able.
+
+#### Stats table
 
 | # | Range | Damage | AOE | Hits | Speed | Perfect Window | OK Window | Special |
 |---|-------|--------|-----|------|-------|----------------|-----------|---------|
-| A1 | 1 | 1 | 1 | 1 | — | 0.16s | 0.32s | dual_bar: bar1 ×0.80 speed, bar2 ×1.30 speed |
+| A1 | charge | 1 | 1 | 1 per character on path | — | 0.20s | 0.40s | parry-able; charge consumes both actions; non-target pushes at ±60° alternating, target push along charge direction |
 
-**Special flags**: dual_bar
-
-**Dual bar behavior**: A1 spawns two sequential dodge bars. Bar 1 runs at 0.80× speed. Bar 2 runs at 1.30× speed. Both must be resolved. Damage applies if either bar is missed.
-
+**Special flags**: charges, parry-able, lock-on
+**Notes**: Lock established on Bulldozer's turn-start when nearest player ≤4 hexes WITH line of sight. Lock is permanent until target death. Charge re-aims each turn at locked target's current hex. See §5B for SPACE-timing implementation, `_push_enemy` for push chain rules.
 ---
 
 ### Training Dummy — D (green)
