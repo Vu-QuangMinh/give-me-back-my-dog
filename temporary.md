@@ -1,3 +1,47 @@
+## 2026-04-29 — Mage enemy wired up (aim + eruption cycle)
+
+**Changes (enemy.gd)**:
+- Added `eruption_attack_idx: int = 0` runtime state (which attack was aimed).
+- `plan_action()` RANGER branch: mage special case — returns "erupt" if pending_eruption, "move_away" if adjacent (dist ≤ 1), "aim" if dist ≤ range_max (6), else falls through to "move". LOS check delegated to main.gd.
+- Added `interrupt_cast()`: clears pending_eruption + locked coords, returns true if a cast was active.
+
+**Changes (Player.gd)**:
+- Added `var burn_stacks: int = 0`.
+
+**Changes (hextile.gd)**:
+- Added `COLOR_MAGE_AIM = Color(0.92, 0.50, 0.10)` and `"mage_aim"` case in `set_state`.
+
+**Changes (main.gd)**:
+- Added `var _mage_aim_hexes: Dictionary = {}` state var.
+- `_refresh_tile_colors()`: calls `_mage_refresh_aim_hexes()` at the end to re-paint aura on top of normal colors.
+- `_run_enemy_actions()`: before the actions loop, if mage has `pending_eruption`, calls `await _mage_erupt_async(enemy)`. Added `"aim"` match case → `_mage_set_aim(enemy, target_idx)` + ACTION_DELAY.
+- `_on_charge_resolved()`: calls `_maybe_interrupt_mage_cast(target)` after damaging an enemy.
+- `_handle_enemy_proj_hit()`: calls `_maybe_interrupt_mage_cast(enemy)` after damaging an enemy.
+- Enemy turn end: added burn tick for players alongside existing poison tick.
+- Added functions: `_mage_get_affected_hexes`, `_mage_refresh_aim_hexes`, `_mage_set_aim`, `_mage_erupt_async`, `_maybe_interrupt_mage_cast`.
+
+---
+
+## 2026-04-29 — Assassin fully implemented
+
+**Changes (enemy.gd)**:
+- Assassin preset rewritten: A1 = Poison Dagger (range 6, damage 1, speed medium, poison_stacks 1, single_use true); A2 = Melee Combo (range 1, hits 2, dual_bar true, timing_lines [0.60, 0.75], speed_mults [0.70, 1.40]).
+- New attack dict keys documented: `poison_stacks`, `single_use`, `timing_lines`.
+- Added `ranged_used: bool = false` runtime state (tracks if single-use A1 has fired).
+- `plan_action()`: assassin branch prefers A1 if not `ranged_used` and player within 6 hexes; falls back to A2 if adjacent; else moves.
+
+**Changes (main.gd)**:
+- `_fire_enemy_projectile()`: passes `attack["poison_stacks"]` onto `proj.proj_poison_stacks`.
+- `_handle_player_proj_contact_async()`: on "miss", increments `player.poison_stacks` and shows a POISON popup.
+- `_trigger_dodge_bar()`: supports `dual_bar` — iterates `bar_count` bars, each with its own `timing_lines[i]` and `speed_mults[i]`.
+- `_enemy_perform_attack()`: after a `single_use` ranged attack fires, sets `enemy.ranged_used = true`.
+- `_run_enemy_turn()`: ticks player poison stacks at end of enemy turn (deal N dmg, decrement stacks, check game over).
+
+**Changes (Player.gd)**: added `var poison_stacks: int = 0`.
+**Changes (projectile.gd)**: added `var proj_poison_stacks: int = 0`.
+
+---
+
 ## 2026-04-29 — Sonny redirect works on enemy projectiles
 
 **Fix**: Enemy projectiles have `negative_bounce = 9999` and `uses_decay = false`. When Sonny redirected one, `redirect_to` added `9999 × 0.5 ≈ 5000` speed, making the ball teleport across the map and die on the next wall bounce.

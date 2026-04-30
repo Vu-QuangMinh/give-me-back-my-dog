@@ -22,6 +22,7 @@ const COLOR_ATTACK   = Color(0.82, 0.26, 0.20)   # đỏ chói — ô tấn côn
 const COLOR_COLUMN   = Color(0.30, 0.22, 0.14)   # nâu sậm — cột chặn
 const COLOR_FIRE_PIT = Color(0.68, 0.32, 0.10)   # cam-đỏ — fire pit
 const COLOR_LADDER   = Color(0.45, 0.55, 0.20)   # ô-liu
+const COLOR_MAGE_AIM = Color(0.92, 0.50, 0.10)   # cam — mage aim aura
 
 # Tint nhân với grass texture (giữ nét grass nhưng vẫn highlight được state).
 const COLOR_GRASS_NORMAL   = Color(1.00, 1.00, 1.00)
@@ -238,4 +239,5 @@ func set_state(state: String) -> void:
 		"enemy":    material.albedo_color = COLOR_ENEMY
 		"attack":   material.albedo_color = COLOR_ATTACK
 		"ladder":   material.albedo_color = COLOR_LADDER
+		"mage_aim": material.albedo_color = COLOR_MAGE_AIM
 		_:          material.albedo_color = COLOR_NORMAL

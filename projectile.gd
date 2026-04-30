@@ -32,8 +32,9 @@ var proj_damage     : float   = 1.0
 var negative_bounce : float   = 5.0
 var owner_node      : Node    = null            # null = god-owned (hits everyone)
 var uses_decay      : bool    = true
-var redirect_count  : int     = 0
-var is_supercharged : bool    = false
+var redirect_count      : int     = 0
+var is_supercharged     : bool    = false
+var proj_poison_stacks  : int     = 0
 
 # ─── Internal ─────────────────────────────────────────────
 var _dead        : bool  = false
@@ -88,6 +89,20 @@ func die() -> void:
 	_dead = true
 	emit_signal("projectile_died")
 	queue_free()
+
+# Returns poison stacks this projectile carries and zeroes them out (one application per hit).
+func consume_poison() -> int:
+	if proj_poison_stacks <= 0: return 0
+	var s := proj_poison_stacks
+	proj_poison_stacks = 0
+	return s
+
+# Tints the projectile green to signal it carries poison (call after add_child).
+func paint_poison() -> void:
+	if _ball_mat == null: return
+	_ball_mat.albedo_color               = Color(0.20, 0.85, 0.30)
+	_ball_mat.emission                   = Color(0.10, 0.65, 0.10)
+	_ball_mat.emission_energy_multiplier = 0.8
 
 # ═══════════════════════════════════════════════════════════
 #  VISUALS

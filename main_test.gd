@@ -22,7 +22,7 @@ extends "res://main.gd"
 #  "dummy"     0 dmg, 999 HP — safe punching bag for mechanic tests
 # ═══════════════════════════════════════════════════════════
 
-var ACTIVE_SCENARIO : String = "archer_test"
+var ACTIVE_SCENARIO : String = "mage_test"
 
 const SCENARIOS : Dictionary = {
 	# ── Minimal starting point ──────────────────────────────
@@ -45,16 +45,35 @@ const SCENARIOS : Dictionary = {
 		"columns":   [Vector2i(5, 4), Vector2i(6, 2)],
 		"fire_pits": [],
 		"enemies": [
-			{ "type": "archer", "col": 3, "row": 2 },
-			{ "type": "archer", "col": 3, "row": 5 },
+			{ "type": "mage", "col": 3, "row": 2 },
+			{ "type": "mage", "col": 3, "row": 5 },
+		],
+	},
+	"mage_test": {
+		"columns":   [Vector2i(5, 4), Vector2i(6, 2)],
+		"fire_pits": [],
+		"enemies": [
+			{ "type": "mage", "col": 3, "row": 2 },
+			{ "type": "mage", "col": 3, "row": 5 },
 		],
 	},
 	"assassin_test": {
 		"columns":   [],
 		"fire_pits": [],
 		"enemies": [
-			{ "type": "assassin", "col": 7, "row": 3 },
-			{ "type": "grunt",    "col": 8, "row": 2 },
+			{ "type": "assassin", "col": 3, "row": 3 },
+			{ "type": "grunt",    "col": 3, "row": 2 },
+		],
+	},
+	"bulldozer_test": {
+		"columns":   [Vector2i(5, 4), Vector2i(6, 2)],
+		"fire_pits": [],
+		"enemies": [
+			{ "type": "bulldozer", "col": 7, "row": 5 },
+			{ "type": "bulldozer", "col": 7, "row": 4 },
+			{ "type": "grunt",    "col": 2, "row": 2 },
+			{ "type": "archer", "col": 8, "row": 5 },
+			{ "type": "archer", "col": 8, "row": 6 }
 		],
 	},
 	"bomb_test": {
