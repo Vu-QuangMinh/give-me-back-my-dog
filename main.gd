@@ -199,6 +199,7 @@ var mike_aim_overlay       : Node    = null   # AimOverlay3D — preview project
 # ─── Projectile runtime state ────────────────────────────────
 var active_projectiles  : Array      = []    # Array[Projectile3D]
 var _bz_lock_lines      : Dictionary = {}    # bz instance_id → MeshInstance3D
+var _mage_aim_hexes     : Dictionary = {}    # Vector2i → true; all hexes under active mage aura
 var _entity_tweens      : Dictionary = {}    # entity instance_id → Tween
 var _proj_last_col_hex  : Dictionary = {}    # instance_id → Vector2i (last column bounced)
 var _proj_last_char_hex : Dictionary = {}    # instance_id → Vector2i (last char hex entered)
@@ -803,6 +804,7 @@ func _refresh_tile_colors() -> void:
 	# Aim preview cho Mike — update khi state đổi (move/switch/hover).
 	# Tự gate trong _update_aim_preview (chỉ chạy khi Mike active + hover enemy + LOS clear).
 	_update_aim_preview()
+	_mage_refresh_aim_hexes()
 
 # ═══════════════════════════════════════════════════════════
 #  ENTITY SPAWNING
@@ -1137,6 +1139,7 @@ func _on_charge_resolved(result: String, target: Node) -> void:
 			_push_enemy(target, current_player.grid_col, current_player.grid_row, 1)
 			if is_instance_valid(target) and target.hp > 0:
 				target.take_damage(dmg)
+				_maybe_interrupt_mage_cast(target)
 				_spawn_damage_popup(target.position + Vector3(0, 1.8, 0),
 					"-%d" % dmg, Color(1.0, 0.55, 0.30))
 				if target.hp <= 0:
@@ -1526,6 +1529,7 @@ func _handle_enemy_proj_hit(proj: Projectile3D, enemy: Node) -> void:
 		_supercharged_explosion(proj, Vector2i(enemy.grid_col, enemy.grid_row))
 		return
 	enemy.take_damage(proj.proj_damage)
+	_maybe_interrupt_mage_cast(enemy)
 	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
 		"-%d" % int(proj.proj_damage), Color(1.0, 0.55, 0.30))
 	var poison := proj.consume_poison()
@@ -2169,7 +2173,7 @@ func _run_enemy_turn() -> void:
 			Color(1.0, 0.30, 0.30), _restart_from_floor_zero)
 		return
 
-	# Tick poison stacks for each living player.
+	# Tick poison and burn stacks for each living player.
 	for i in range(players.size()):
 		var p = players[i]
 		if p.hp > 0 and p.poison_stacks > 0:
@@ -2178,6 +2182,12 @@ func _run_enemy_turn() -> void:
 			_apply_damage_to_player(i, dmg, "hit")
 			_spawn_damage_popup(p.position + Vector3(0, 2.4, 0),
 				"POISON -%d HP" % dmg, Color(0.40, 0.85, 0.20))
+		if p.hp > 0 and p.burn_stacks > 0:
+			var dmg : int = p.burn_stacks
+			p.burn_stacks -= 1
+			_apply_damage_to_player(i, dmg, "hit")
+			_spawn_damage_popup(p.position + Vector3(0, 2.4, 0),
+				"BURN -%d HP" % dmg, Color(0.92, 0.50, 0.10))
 	if _all_players_dead():
 		phase = Phase.DEAD
 		_refresh_debug()
@@ -2222,6 +2232,10 @@ func _run_enemy_actions(enemy: Node) -> void:
 			_kill_enemy(enemy)
 			return
 	enemy.has_attacked_this_turn = false
+	# Mage: pending eruption fires free before the normal action this turn.
+	if enemy.enemy_type == "mage" and enemy.pending_eruption:
+		await _mage_erupt_async(enemy)
+		if not is_instance_valid(enemy) or enemy.hp <= 0: return
 	for i in range(enemy.actions_per_turn):
 		if enemy.hp <= 0: return
 		if _all_players_dead(): return
@@ -2243,6 +2257,9 @@ func _run_enemy_actions(enemy: Node) -> void:
 					# Lock failed — spend remaining action moving
 					_enemy_move_toward(enemy, target_idx)
 					await get_tree().create_timer(ACTION_DELAY).timeout
+			"aim":
+				_mage_set_aim(enemy, target_idx)
+				await get_tree().create_timer(ACTION_DELAY).timeout
 			"move":
 				_enemy_move_toward(enemy, target_idx)
 				await get_tree().create_timer(ACTION_DELAY).timeout
@@ -2362,6 +2379,101 @@ func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") 
 		if current_player_index < players.size():
 			var cur = players[current_player_index]
 			hud.set_hype_from_perfection(cur.perfection, cur.perfection_cap)
+
+# ═══════════════════════════════════════════════════════════
+#  MAGE — telegraph + eruption cycle
+# ═══════════════════════════════════════════════════════════
+
+# Returns the hexes that will be hit when this mage erupts (locked at aim time).
+func _mage_get_affected_hexes(enemy: Node) -> Array:
+	var tc : int = enemy.eruption_target_col
+	var tr : int = enemy.eruption_target_row
+	if tc < 0 or enemy.eruption_attack_idx >= enemy.attacks.size(): return []
+	var atk : Dictionary = enemy.attacks[enemy.eruption_attack_idx]
+	if atk.get("is_beam", false):
+		var line : Array = _hex_line(enemy.grid_col, enemy.grid_row, tc, tr)
+		if not line.is_empty(): line.pop_front()  # exclude mage's own hex
+		return line
+	else:
+		return [Vector2i(tc, tr)] + _get_neighbors(tc, tr)
+
+# Repaint all active mage aim auras on top of the normal tile colors.
+func _mage_refresh_aim_hexes() -> void:
+	_mage_aim_hexes.clear()
+	for e in enemies:
+		if not is_instance_valid(e): continue
+		if e.enemy_type != "mage" or not e.pending_eruption: continue
+		for h in _mage_get_affected_hexes(e):
+			_mage_aim_hexes[h] = true
+	for h in _mage_aim_hexes:
+		var tile = tiles.get(h)
+		if tile: tile.set_state("mage_aim")
+
+# Called when a mage takes its "aim" action.
+func _mage_set_aim(enemy: Node, target_idx: int) -> void:
+	var p = players[target_idx]
+	if not _has_line_of_sight(enemy.grid_col, enemy.grid_row, p.grid_col, p.grid_row):
+		_enemy_move_toward(enemy, target_idx)
+		return
+	enemy.eruption_attack_idx = enemy.attack_index
+	enemy.eruption_target_col = p.grid_col
+	enemy.eruption_target_row = p.grid_row
+	enemy.pending_eruption    = true
+	enemy.advance_attack()
+	_refresh_tile_colors()  # includes _mage_refresh_aim_hexes at the end
+	_spawn_damage_popup(enemy.position + Vector3(0, 2.2, 0), "AIM!", Color(0.92, 0.50, 0.10))
+
+# Free action at start of mage's turn: 3-2-1 countdown then erupt.
+func _mage_erupt_async(enemy: Node) -> void:
+	var hexes : Array = _mage_get_affected_hexes(enemy)
+	enemy.pending_eruption    = false
+	enemy.eruption_target_col = -1
+	enemy.eruption_target_row = -1
+	if hexes.is_empty():
+		_refresh_tile_colors()
+		return
+	# 3-2-1 countdown over the affected area center
+	var center_w : Vector3 = hex_to_world(hexes[0].x, hexes[0].y)
+	for n in [3, 2, 1]:
+		_spawn_damage_popup(center_w + Vector3(0, 2.5, 0), str(n), Color(0.92, 0.50, 0.10))
+		await get_tree().create_timer(0.3).timeout
+	# Find players standing on affected hexes
+	var caught : Array = []
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		if player_positions[i] in hexes:
+			caught.append(i)
+	# Clear aura before resolution
+	_refresh_tile_colors()
+	if caught.is_empty():
+		return
+	# Single shared DodgeBar for all caught players
+	var atk  : Dictionary = enemy.attacks[enemy.eruption_attack_idx]
+	var dmg  : int        = int(atk.get("damage", 1))
+	var burn : int        = int(atk.get("burn_stacks", 0))
+	phase = Phase.DODGE_PHASE
+	var bar = DodgeBarScene.instantiate()
+	bar.setup(enemy.dodge_line, 1.0)
+	camera.add_child(bar)
+	bar.position = Vector3(0.0, -0.18, -1.2)
+	var result : String = await bar.bar_finished
+	phase = Phase.ENEMY_TURN
+	for idx in caught:
+		var head_pos : Vector3 = players[idx].position + Vector3(0, 1.9, 0)
+		_apply_damage_to_player(idx, dmg, result)
+		if burn > 0:
+			players[idx].burn_stacks += burn
+			_spawn_damage_popup(head_pos + Vector3(0, 0.6, 0),
+				"BURN x%d" % players[idx].burn_stacks, Color(0.92, 0.50, 0.10))
+
+# Interrupt a mage's queued cast when it takes damage or is pushed.
+func _maybe_interrupt_mage_cast(enemy: Node) -> void:
+	if not is_instance_valid(enemy): return
+	if enemy.enemy_type != "mage": return
+	if enemy.interrupt_cast():
+		_refresh_tile_colors()
+		_spawn_damage_popup(enemy.position + Vector3(0, 2.2, 0),
+			"INTERRUPTED!", Color(0.80, 0.80, 0.80))
 
 # ═══════════════════════════════════════════════════════════
 #  BULLDOZER — lock-on + charge

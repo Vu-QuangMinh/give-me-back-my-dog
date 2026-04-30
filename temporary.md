@@ -1,3 +1,27 @@
+## 2026-04-29 — Mage enemy wired up (aim + eruption cycle)
+
+**Changes (enemy.gd)**:
+- Added `eruption_attack_idx: int = 0` runtime state (which attack was aimed).
+- `plan_action()` RANGER branch: mage special case — returns "erupt" if pending_eruption, "move_away" if adjacent (dist ≤ 1), "aim" if dist ≤ range_max (6), else falls through to "move". LOS check delegated to main.gd.
+- Added `interrupt_cast()`: clears pending_eruption + locked coords, returns true if a cast was active.
+
+**Changes (Player.gd)**:
+- Added `var burn_stacks: int = 0`.
+
+**Changes (hextile.gd)**:
+- Added `COLOR_MAGE_AIM = Color(0.92, 0.50, 0.10)` and `"mage_aim"` case in `set_state`.
+
+**Changes (main.gd)**:
+- Added `var _mage_aim_hexes: Dictionary = {}` state var.
+- `_refresh_tile_colors()`: calls `_mage_refresh_aim_hexes()` at the end to re-paint aura on top of normal colors.
+- `_run_enemy_actions()`: before the actions loop, if mage has `pending_eruption`, calls `await _mage_erupt_async(enemy)`. Added `"aim"` match case → `_mage_set_aim(enemy, target_idx)` + ACTION_DELAY.
+- `_on_charge_resolved()`: calls `_maybe_interrupt_mage_cast(target)` after damaging an enemy.
+- `_handle_enemy_proj_hit()`: calls `_maybe_interrupt_mage_cast(enemy)` after damaging an enemy.
+- Enemy turn end: added burn tick for players alongside existing poison tick.
+- Added functions: `_mage_get_affected_hexes`, `_mage_refresh_aim_hexes`, `_mage_set_aim`, `_mage_erupt_async`, `_maybe_interrupt_mage_cast`.
+
+---
+
 ## 2026-04-29 — Assassin fully implemented
 
 **Changes (enemy.gd)**:

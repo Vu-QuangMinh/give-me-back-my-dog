@@ -22,7 +22,7 @@ extends "res://main.gd"
 #  "dummy"     0 dmg, 999 HP — safe punching bag for mechanic tests
 # ═══════════════════════════════════════════════════════════
 
-var ACTIVE_SCENARIO : String = "bulldozer_test"
+var ACTIVE_SCENARIO : String = "mage_test"
 
 const SCENARIOS : Dictionary = {
 	# ── Minimal starting point ──────────────────────────────
@@ -45,8 +45,16 @@ const SCENARIOS : Dictionary = {
 		"columns":   [Vector2i(5, 4), Vector2i(6, 2)],
 		"fire_pits": [],
 		"enemies": [
-			{ "type": "archer", "col": 3, "row": 2 },
-			{ "type": "archer", "col": 3, "row": 5 },
+			{ "type": "mage", "col": 3, "row": 2 },
+			{ "type": "mage", "col": 3, "row": 5 },
+		],
+	},
+	"mage_test": {
+		"columns":   [Vector2i(5, 4), Vector2i(6, 2)],
+		"fire_pits": [],
+		"enemies": [
+			{ "type": "mage", "col": 3, "row": 2 },
+			{ "type": "mage", "col": 3, "row": 5 },
 		],
 	},
 	"assassin_test": {

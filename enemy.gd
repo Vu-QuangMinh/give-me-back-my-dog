@@ -26,6 +26,10 @@ enum Behavior { AGGRESSIVE, RANGER, DUMMY, BULLDOZER }
 #    hit_details    Array  per-hit override dicts when hits > 1 and not identical
 #    poison_stacks  int    stacks of poison to apply on hit (ranged only)
 #    single_use     bool   true → attack can only fire once per combat
+#    telegraphed    bool   true → aim on turn N (costs action), erupt free at turn N+1 start
+#    is_beam        bool   true → eruption area is hex line from Mage to target (Fire Lance)
+#                           false/absent → eruption area is target hex + adjacent ring (Inferno Bloom)
+#    burn_stacks    int    burn stacks applied on eruption contact, even if damage is dodged (mage only)
 # ═══════════════════════════════════════════════════════════════════
 
 const ENEMY_PRESETS : Dictionary = {
@@ -71,6 +75,32 @@ const ENEMY_PRESETS : Dictionary = {
 			  	{ "damage": 0.5, "speed": "fast", "delay": 0.0 },
 			  	{ "damage": 0.5, "speed": "fast", "delay": 0.3 },
 			  ] },
+		],
+	},
+	"mage": {
+		"enemy_type":       "mage",
+		"display_label":    "M",
+		"max_hp":           2,
+		"actions_per_turn": 1,
+		"move_range":       2,
+		"body_color":       Color(0.78, 0.22, 0.55),
+		"behavior":         Behavior.RANGER,
+		"immovable":        false,
+		"range_min":        2,
+		"range_max":        6,
+		"attacks": [
+			# A1 — Inferno Bloom: telegraphed AOE (target hex + ring). Aim costs action on turn N,
+			# eruption fires free at start of turn N+1. Burn applies even on dodge.
+			{ "range": 6, "damage": 1, "aoe": 2, "hits": 1, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [],
+			  "telegraphed": true, "burn_stacks": 1 },
+			# A2 — Fire Lance: telegraphed beam along hex line from Mage to target.
+			# Affected hexes locked at aim time. Same resolution rules as A1.
+			{ "range": 6, "damage": 1, "aoe": 1, "hits": 1, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [],
+			  "telegraphed": true, "is_beam": true, "burn_stacks": 1 },
 		],
 	},
 	"assassin": {
@@ -166,6 +196,7 @@ var grid_row               : int   = 0
 var dodge_line             : float = 0.0
 var bleed_stacks           : int   = 0
 var poison_stacks          : int   = 0
+var burn_stacks            : int   = 0
 var disarmed_turns         : int   = 0
 var attack_index           : int   = 0
 var has_attacked_this_turn : bool  = false
@@ -175,6 +206,10 @@ var lock_target_idx        : int   = -1     # bulldozer: locked player index, -1
 var charge_this_turn       : bool  = false  # bulldozer: charged, skip remaining actions
 var move_done_this_turn    : bool  = false  # bulldozer: moved without lock; next = lock attempt
 var lock_attempted         : bool  = false  # bulldozer: lock attempt made this turn
+var pending_eruption       : bool  = false  # mage: eruption queued from last turn's aim
+var eruption_attack_idx    : int   = 0      # mage: index into attacks[] that was aimed
+var eruption_target_col    : int   = -1     # mage: hex col locked at aim time
+var eruption_target_row    : int   = -1     # mage: hex row locked at aim time
 
 # ═══════════════════════════════════════════════════════════════════
 #  3D NODES (từ scene)
@@ -260,10 +295,20 @@ func plan_action(player_col: int, player_row: int,
 				if dist <= atk_range:
 					return "attack"
 		Behavior.RANGER:
-			if dist < range_min:
-				return "move_away"
-			if dist <= atk_range:
-				return "attack"
+			if enemy_type == "mage":
+				# Pending eruption fires free before the normal action; main.gd calls
+				# plan_action a second time for the remaining action after resolving it.
+				if pending_eruption:
+					return "erupt"
+				if dist <= 1:
+					return "move_away"
+				if dist <= range_max:  # LOS check is main.gd's responsibility
+					return "aim"
+			else:
+				if dist < range_min:
+					return "move_away"
+				if dist <= atk_range:
+					return "attack"
 	return "move"
 
 func best_move_toward(player_col: int, player_row: int,
@@ -330,6 +375,22 @@ func tick_poison() -> int:
 	var dmg := poison_stacks
 	poison_stacks -= 1
 	return dmg
+
+# Returns burn damage to deal this turn and decrements one stack.
+func tick_burn() -> int:
+	if burn_stacks <= 0: return 0
+	var dmg := burn_stacks
+	burn_stacks -= 1
+	return dmg
+
+# Called by main.gd when mage takes damage or is pushed during the aim→erupt window.
+# Returns true if a cast was actually interrupted.
+func interrupt_cast() -> bool:
+	if not pending_eruption: return false
+	pending_eruption    = false
+	eruption_target_col = -1
+	eruption_target_row = -1
+	return true
 
 # ═══════════════════════════════════════════════════════════════════
 #  HEX HELPERS
