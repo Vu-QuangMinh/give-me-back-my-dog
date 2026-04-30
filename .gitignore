@@ -7,6 +7,15 @@
 
 # Exported game binaries (not source — too big for git)
 *.exe
+*.console.exe
 *.pck
 *.dll
 dist/
+
+# OS / driver crash dump dirs auto-created in working dir
+NVIDIA Corporation/
+
+# Windows OS metadata
+desktop.ini
+Thumbs.db
+.DS_Store

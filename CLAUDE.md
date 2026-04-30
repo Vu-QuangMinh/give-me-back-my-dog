@@ -99,13 +99,13 @@ DEAD        → (modal click/ENTER) → restart from floor 0
 Cube-coordinate conversion (used for distance and neighbors):
 ```gdscript
 func to_cube(c, r):
-    var x = c
-    var z = r - (c - (c & 1)) / 2
-    return Vector3i(x, -x - z, z)
+	var x = c
+	var z = r - (c - (c & 1)) / 2
+	return Vector3i(x, -x - z, z)
 
 func hex_dist(c1, r1, c2, r2):
-    var a = to_cube(c1, r1); var b = to_cube(c2, r2)
-    return maxi(maxi(abs(a.x-b.x), abs(a.y-b.y)), abs(a.z-b.z))
+	var a = to_cube(c1, r1); var b = to_cube(c2, r2)
+	return maxi(maxi(abs(a.x-b.x), abs(a.y-b.y)), abs(a.z-b.z))
 ```
 
 Neighbor offsets use parity (even vs odd column). This math is duplicated in enemy.gd and main.gd — not extracted to a shared utility.

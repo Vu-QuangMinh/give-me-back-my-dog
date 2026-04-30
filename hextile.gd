@@ -6,7 +6,7 @@ class_name HexTile
 #  Đáy ở Y=0, mặt trên ở Y=TILE_HEIGHT.
 # ═══════════════════════════════════════════════
 
-enum Type { NORMAL, COLUMN, FIRE_PIT }
+enum Type { NORMAL, COLUMN, FIRE_PIT, GRASS }
 
 const HEX_SIZE        : float = 1.0     # khớp với main.gd
 const TILE_HEIGHT     : float = 0.2
@@ -23,6 +23,14 @@ const COLOR_COLUMN   = Color(0.30, 0.22, 0.14)   # nâu sậm — cột chặn
 const COLOR_FIRE_PIT = Color(0.68, 0.32, 0.10)   # cam-đỏ — fire pit
 const COLOR_LADDER   = Color(0.45, 0.55, 0.20)   # ô-liu
 
+# Tint nhân với grass texture (giữ nét grass nhưng vẫn highlight được state).
+const COLOR_GRASS_NORMAL   = Color(1.00, 1.00, 1.00)
+const COLOR_GRASS_HOVER    = Color(1.20, 1.10, 0.85)
+const COLOR_GRASS_SELECTED = Color(0.65, 1.40, 1.20)
+const COLOR_GRASS_VALID    = Color(0.75, 1.40, 0.75)
+const COLOR_GRASS_ENEMY    = Color(1.40, 0.75, 0.70)
+const COLOR_GRASS_ATTACK   = Color(1.60, 0.55, 0.45)
+
 const COLOR_OUTLINE  = Color(1.0, 1.0, 1.0, 1.0) # viền trắng
 
 var tile_type : Type = Type.NORMAL
@@ -34,6 +42,10 @@ var mesh_inst    : MeshInstance3D     = null
 var material     : StandardMaterial3D = null
 var column_mesh  : MeshInstance3D     = null
 var outline_mesh : MeshInstance3D     = null
+var coord_label  : Label3D            = null
+
+# Static cache: tất cả tile GRASS share 1 ImageTexture (đỡ 96 lần build).
+static var _grass_texture : ImageTexture = null
 
 func _ready() -> void:
 	if mesh_inst == null:
@@ -72,6 +84,16 @@ func setup(col: int, row: int, t: Type = Type.NORMAL) -> void:
 		_build_base_mesh()
 	if outline_mesh == null:
 		_build_outline()
+	if coord_label == null:
+		_build_coord_label()
+	else:
+		coord_label.text = _format_coord(grid_col, grid_row)
+	# GRASS: gắn texture cỏ procedural; type khác: clear texture nếu có.
+	if material:
+		if t == Type.GRASS:
+			material.albedo_texture = _build_grass_texture()
+		else:
+			material.albedo_texture = null
 	_apply_base_color()
 	if t == Type.COLUMN and column_mesh == null:
 		_build_column_pillar()
@@ -127,12 +149,64 @@ func _build_outline() -> void:
 
 	add_child(outline_mesh)
 
+# Số thứ tự "<COL_LETTER>,<row>" lên mặt trên ô hex — user dùng để chỉ định
+# công việc cho ô cụ thể (vd "ô F,3 đặt cây"). Col → A..L (26 chữ cái cho cols
+# 0..25, AA-... cho cols >25). Label3D nằm phẳng (rotation X=-90) trên mặt
+# tile, đọc được từ camera pitch ~41°.
+func _build_coord_label() -> void:
+	coord_label = Label3D.new()
+	coord_label.text             = _format_coord(grid_col, grid_row)
+	coord_label.font_size        = 64
+	coord_label.pixel_size       = 0.005
+	coord_label.outline_size     = 6
+	coord_label.outline_modulate = Color(0, 0, 0, 0.95)
+	coord_label.modulate         = Color(1.0, 1.0, 1.0, 0.95)
+	coord_label.no_depth_test    = true
+	coord_label.position         = Vector3(0.0, TILE_HEIGHT + 0.005, 0.0)
+	coord_label.rotation_degrees = Vector3(-90.0, 0.0, 0.0)   # nằm phẳng trên mặt tile
+	add_child(coord_label)
+
+static func _format_coord(col: int, row: int) -> String:
+	return "%s,%d" % [_col_to_letter(col), row]
+
+static func _col_to_letter(col: int) -> String:
+	if col < 0: return "?"
+	if col < 26:
+		return String.chr(65 + col)            # A..Z
+	# 26+: AA, AB, ... (Excel-style). Grid 12 col hiện chưa cần nhưng để safe.
+	return _col_to_letter(col / 26 - 1) + String.chr(65 + (col % 26))
+
+# Procedural grass texture — cellular noise → green color ramp. Build 1 lần,
+# share cho mọi grass tile qua static var.
+static func _build_grass_texture() -> ImageTexture:
+	if _grass_texture != null: return _grass_texture
+	var size : int = 64
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+	noise.frequency  = 0.18
+	noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN_SQUARED
+	noise.cellular_return_type       = FastNoiseLite.RETURN_DISTANCE
+	noise.seed = 42
+	var img : Image = Image.create(size, size, false, Image.FORMAT_RGB8)
+	for y in size:
+		for x in size:
+			var v : float = clampf((noise.get_noise_2d(float(x), float(y)) + 1.0) * 0.5, 0.0, 1.0)
+			# Green range: dark → mid-bright. Slight randomness cho speckle.
+			var spec : float = randf() * 0.05
+			var r : float = 0.18 + v * 0.30 + spec
+			var g : float = 0.42 + v * 0.32 + spec
+			var b : float = 0.12 + v * 0.18 + spec
+			img.set_pixel(x, y, Color(r, g, b))
+	_grass_texture = ImageTexture.create_from_image(img)
+	return _grass_texture
+
 func _apply_base_color() -> void:
 	if material == null: return
 	match tile_type:
 		Type.NORMAL:   material.albedo_color = COLOR_NORMAL
 		Type.COLUMN:   material.albedo_color = COLOR_COLUMN
 		Type.FIRE_PIT: material.albedo_color = COLOR_FIRE_PIT
+		Type.GRASS:    material.albedo_color = COLOR_GRASS_NORMAL
 
 # ═══════════════════════════════════════════════
 #  STATE — main.gd gọi mỗi khi cần update màu
@@ -144,6 +218,18 @@ func set_state(state: String) -> void:
 		_apply_base_color()
 		return
 	if material == null: return
+	# GRASS: tint nhẹ multiplicative để giữ texture cỏ rõ nét.
+	if tile_type == Type.GRASS:
+		match state:
+			"normal":   material.albedo_color = COLOR_GRASS_NORMAL
+			"hover":    material.albedo_color = COLOR_GRASS_HOVER
+			"selected": material.albedo_color = COLOR_GRASS_SELECTED
+			"valid":    material.albedo_color = COLOR_GRASS_VALID
+			"enemy":    material.albedo_color = COLOR_GRASS_ENEMY
+			"attack":   material.albedo_color = COLOR_GRASS_ATTACK
+			"ladder":   material.albedo_color = COLOR_GRASS_NORMAL
+			_:          material.albedo_color = COLOR_GRASS_NORMAL
+		return
 	match state:
 		"normal":   material.albedo_color = COLOR_NORMAL
 		"hover":    material.albedo_color = COLOR_HOVER

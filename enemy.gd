@@ -1,16 +1,16 @@
 extends Node3D
 class_name Enemy
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  BEHAVIOR ENUM
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 enum Behavior { AGGRESSIVE, RANGER, DUMMY }
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  ENEMY PRESETS
-#  ► All per-enemy tuning lives here — mirror of CHARACTER_PRESETS in Player.gd.
-#  ► Call _spawn_enemy("grunt", col, row) in main.gd to instantiate.
+#  â–º All per-enemy tuning lives here â€” mirror of CHARACTER_PRESETS in Player.gd.
+#  â–º Call _spawn_enemy("grunt", col, row) in main.gd to instantiate.
 #
 #  Attack dict keys:
 #    range          int    1 = melee (dodge bar), 2+ = ranged (projectile)
@@ -20,15 +20,15 @@ enum Behavior { AGGRESSIVE, RANGER, DUMMY }
 #    speed          String "" for melee; "slow" / "medium" / "fast" for ranged
 #    perfect_window float  seconds from timing line (melee only)
 #    ok_window      float  seconds from timing line (melee only)
-#    dual_bar       bool   true → spawn two sequential dodge bars
+#    dual_bar       bool   true â†’ spawn two sequential dodge bars
 #    speed_mults    Array  [bar1_mult, bar2_mult] when dual_bar == true
 #    hit_details    Array  per-hit override dicts when hits > 1 and not identical
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const ENEMY_PRESETS : Dictionary = {
 	"grunt": {
 		"enemy_type":       "grunt",
-		"display_label":    "G",
+		"display_label":    "Crab",
 		"max_hp":           3,
 		"actions_per_turn": 2,
 		"move_range":       2,
@@ -43,6 +43,40 @@ const ENEMY_PRESETS : Dictionary = {
 			  "dual_bar": false, "speed_mults": [] },
 			{ "range": 1, "damage": 2, "aoe": 1, "hits": 1, "speed": "",
 			  "perfect_window": 0.15, "ok_window": 0.35,
+			  "dual_bar": false, "speed_mults": [] },
+		],
+	},
+	"squirrel": {
+		"enemy_type":       "squirrel",
+		"display_label":    "Squirrel",
+		"max_hp":           2,
+		"actions_per_turn": 2,
+		"move_range":       3,                              # nhanh hơn crab
+		"body_color":       Color(0.78, 0.55, 0.28),
+		"behavior":         Behavior.AGGRESSIVE,
+		"immovable":        false,
+		"range_min":        0,
+		"range_max":        0,
+		"attacks": [
+			{ "range": 1, "damage": 1, "aoe": 1, "hits": 1, "speed": "",
+			  "perfect_window": 0.18, "ok_window": 0.36,
+			  "dual_bar": false, "speed_mults": [] },
+		],
+	},
+	"bulldozer": {
+		"enemy_type":       "bulldozer",
+		"display_label":    "Bulldozer",
+		"max_hp":           5,                              # tank, máu cao
+		"actions_per_turn": 1,                              # chậm — 1 hành động/turn
+		"move_range":       2,
+		"body_color":       Color(0.55, 0.55, 0.58),       # xám máy móc
+		"behavior":         Behavior.AGGRESSIVE,
+		"immovable":        false,
+		"range_min":        0,
+		"range_max":        0,
+		"attacks": [
+			{ "range": 1, "damage": 2, "aoe": 1, "hits": 1, "speed": "",
+			  "perfect_window": 0.22, "ok_window": 0.44,
 			  "dual_bar": false, "speed_mults": [] },
 		],
 	},
@@ -115,9 +149,9 @@ const ENEMY_PRESETS : Dictionary = {
 	},
 }
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  EXPORTED PARAMETERS
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @export var enemy_type       : String   = "grunt"
 @export var display_label    : String   = "G"
@@ -133,9 +167,9 @@ const ENEMY_PRESETS : Dictionary = {
 
 var attacks : Array = []
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  RUNTIME STATE
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 var hp                     : int   = 0
 var grid_col               : int   = 0
@@ -145,11 +179,11 @@ var bleed_stacks           : int   = 0
 var disarmed_turns         : int   = 0
 var attack_index           : int   = 0
 var has_attacked_this_turn : bool  = false
-var fuse_turns             : int   = 0   # Mốc 7: chỉ dùng cho type "bomb"
+var fuse_turns             : int   = 0   # Má»‘c 7: chá»‰ dÃ¹ng cho type "bomb"
 
-# ═══════════════════════════════════════════════════════════════════
-#  3D NODES (từ scene)
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  3D NODES (tá»« scene)
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 var name_label : Label3D        = null
 var model_node : MeshInstance3D = null
@@ -161,26 +195,135 @@ func _ready() -> void:
 	model_node = get_node_or_null("ModelPlaceholder")
 	if name_label:
 		name_label.text = display_label
-	# Tô placeholder body bằng màu của preset (không ảnh hưởng khi đã thay model thật).
-	# QUAN TRỌNG: duplicate material để mỗi enemy có instance riêng — enemy.tscn
-	# có 1 sub_resource Mat_enemy, nếu không duplicate thì 3 enemy share chung
-	# material → tween alpha của 1 con sẽ làm các con khác cũng tàng hình.
+	# TÃ´ placeholder body báº±ng mÃ u cá»§a preset (khÃ´ng áº£nh hÆ°á»Ÿng khi Ä‘Ã£ thay model tháº­t).
+	# QUAN TRá»ŒNG: duplicate material Ä‘á»ƒ má»—i enemy cÃ³ instance riÃªng â€” enemy.tscn
+	# cÃ³ 1 sub_resource Mat_enemy, náº¿u khÃ´ng duplicate thÃ¬ 3 enemy share chung
+	# material â†’ tween alpha cá»§a 1 con sáº½ lÃ m cÃ¡c con khÃ¡c cÅ©ng tÃ ng hÃ¬nh.
 	if model_node and model_node.material_override is StandardMaterial3D:
 		var mat : StandardMaterial3D = model_node.material_override.duplicate()
 		model_node.material_override = mat
 		mat.albedo_color = body_color
+	# Skinned-mesh enemies dùng dual-model (Base/Walk) swap visibility.
+	# Trải table lên thay vì if-else dài: enemy_type → [base_scene, walk_scene].
+	if DUAL_MODEL_SCENES.has(enemy_type):
+		_setup_dual_model(enemy_type)
+
+# Bảng dual-model cho các enemy có .glb skinned. Key = enemy_type.
+const DUAL_MODEL_SCENES : Dictionary = {
+	"grunt": [
+		preload("res://Enemies/Skull Crab/Skull Crab Base.glb"),
+		preload("res://Enemies/Skull Crab/Skull Crab Walk.glb"),
+	],
+	"squirrel": [
+		preload("res://Enemies/squirrel/Squirrel Base.glb"),
+		preload("res://Enemies/squirrel/Squirrel Walk.glb"),
+	],
+	"bulldozer": [
+		preload("res://Enemies/Bull/Bull Base.glb"),
+		preload("res://Enemies/Bull/Bull Walk.glb"),
+	],
+}
+
+# Target visible height per enemy_type. Skinned mesh AABB undercount → auto-fit
+# cần factor lớn. Base = 0.015; tinh chỉnh per-type qua multiplier.
+const DUAL_MODEL_TARGET_HEIGHT : Dictionary = {
+	"grunt":     0.015 * 0.9,   # crab × 0.9
+	"squirrel":  0.015 * 0.8,   # squirrel × 0.8
+	"bulldozer": 0.015,          # bull default
+}
+const DUAL_MODEL_TARGET_HEIGHT_DEFAULT : float = 0.015
+
+# Active model pair (whichever enemy_type loaded). Swap visibility theo walking.
+var _model_base_inst : Node3D = null
+var _model_walk_inst : Node3D = null
+
+func _setup_dual_model(etype: String) -> void:
+	if model_node:
+		model_node.visible = false
+	var pair : Array = DUAL_MODEL_SCENES[etype]
+	_model_base_inst = _spawn_dual_variant(pair[0], etype + "Base", true)
+	_model_walk_inst = _spawn_dual_variant(pair[1], etype + "Walk", false)
+
+func _spawn_dual_variant(scene: PackedScene, node_name: String, visible: bool) -> Node3D:
+	var inst : Node3D = scene.instantiate() as Node3D
+	if inst == null: return null
+	inst.name = node_name
+	inst.visible = visible
+	add_child(inst)
+	# Tìm AnimationPlayer trong .glb và play anim đầu tiên trên loop. Nếu
+	# không play, mesh đứng ở bind-pose (T-pose) → Base/Walk trông y hệt nhau.
+	var ap : AnimationPlayer = _find_animation_player(inst)
+	if ap and ap.get_animation_list().size() > 0:
+		var anim_name : StringName = ap.get_animation_list()[0]
+		var anim : Animation = ap.get_animation(anim_name)
+		if anim:
+			anim.loop_mode = Animation.LOOP_LINEAR
+		ap.play(anim_name)
+	# Auto-fit: scale model lên target height (model gốc rất nhỏ 0.04mm).
+	var bbox : AABB = _measure_node_aabb(inst)
+	if bbox.size.y > 0.0:
+		var target_h : float = float(DUAL_MODEL_TARGET_HEIGHT.get(
+				enemy_type, DUAL_MODEL_TARGET_HEIGHT_DEFAULT))
+		var s : float = target_h / bbox.size.y
+		inst.scale = Vector3(s, s, s)
+		# Re-measure để recenter bottom-center về inst origin.
+		var bbox2 : AABB = _measure_node_aabb(inst)
+		var bc : Vector3 = bbox2.position + Vector3(
+				bbox2.size.x * 0.5, 0.0, bbox2.size.z * 0.5)
+		inst.position -= bc
+		var ap_info : String = (" anim=" + str(ap.get_animation_list()[0])) \
+				if (ap and ap.get_animation_list().size() > 0) else " anim=NONE"
+		print("[%s %d] %s scale=%.0fx, raw_size.y=%.6f%s" \
+				% [enemy_type, get_instance_id(), node_name, s, bbox.size.y, ap_info])
+	return inst
+
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node is AnimationPlayer:
+		return node
+	for c in node.get_children():
+		var found : AnimationPlayer = _find_animation_player(c)
+		if found != null:
+			return found
+	return null
+
+func _measure_node_aabb(root: Node) -> AABB:
+	var collected : Array = []
+	_collect_mesh_aabbs(root, collected)
+	if collected.is_empty(): return AABB()
+	var combined : AABB = collected[0]
+	for i in range(1, collected.size()):
+		combined = combined.merge(collected[i])
+	return combined
+
+func _collect_mesh_aabbs(node: Node, out: Array) -> void:
+	if node is MeshInstance3D:
+		var mi : MeshInstance3D = node
+		if mi.mesh:
+			out.append(mi.global_transform * mi.get_aabb())
+	for c in node.get_children():
+		_collect_mesh_aabbs(c, out)
+
+# Swap visibility Base ↔ Walk theo state. Gọi từ main.gd qua _move_entity_smooth.
+func anim_set_walking(walking: bool) -> void:
+	if _model_base_inst: _model_base_inst.visible = not walking
+	if _model_walk_inst: _model_walk_inst.visible = walking
 
 func setup(col: int, row: int) -> void:
 	grid_col = col
 	grid_row = row
 
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+#  GRUNT â€” placeholder only. Grunt dÃ¹ng capsule mesh tá»« enemy.tscn,
+#  khÃ´ng cÃ³ .glb model hay animation. Sáº½ thay model má»›i sau.
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
 func refresh_hp_bar() -> void:
-	# TODO Mốc 5: cập nhật HP bar 3D (Label3D hoặc mesh segments)
+	# TODO Má»‘c 5: cáº­p nháº­t HP bar 3D (Label3D hoáº·c mesh segments)
 	pass
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  ATTACK CYCLING
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 func get_current_attack() -> Dictionary:
 	if attacks.is_empty(): return {}
@@ -190,9 +333,9 @@ func advance_attack() -> void:
 	if attacks.is_empty(): return
 	attack_index = (attack_index + 1) % attacks.size()
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  AI
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 func plan_action(player_col: int, player_row: int,
 				 _grid_cols: int, _grid_rows: int) -> String:
@@ -243,9 +386,9 @@ func best_move_away(player_col: int, player_row: int,
 			best      = nb
 	return best
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  COMBAT
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 func take_damage(dmg: int) -> void:
 	hp = maxi(0, hp - dmg)
@@ -255,23 +398,12 @@ func tick_turn() -> void:
 	if disarmed_turns > 0:
 		disarmed_turns -= 1
 
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  HEX HELPERS
-# ═══════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 func _get_neighbors(col: int, row: int) -> Array:
-	var dirs = [[1,0],[-1,0],[0,-1],[0,1],[1,-1],[-1,-1]] if col % 2 == 0 \
-			 else [[1,0],[-1,0],[0,-1],[0,1],[1,1],[-1,1]]
-	var result : Array = []
-	for d in dirs:
-		result.append(Vector2i(col + d[0], row + d[1]))
-	return result
+	return HexUtils.get_neighbors(col, row)
 
 func _hex_dist(c1: int, r1: int, c2: int, r2: int) -> int:
-	var to_cube = func(c, r):
-		var x = c
-		var z = r - (c - (c & 1)) / 2
-		return Vector3i(x, -x - z, z)
-	var a = to_cube.call(c1, r1)
-	var b = to_cube.call(c2, r2)
-	return maxi(maxi(abs(a.x - b.x), abs(a.y - b.y)), abs(a.z - b.z))
+	return HexUtils.hex_dist(c1, r1, c2, r2)

@@ -161,24 +161,25 @@ var name_label : Label3D = null
 var model_node : Node3D  = null   # initial .glb instance từ scene (idle)
 var armor_ring : Node    = null   # TODO Mốc 5: 3D armor visual
 
-# Multi-model animation system (swap visibility, không inject).
-# Mỗi state có 1 .glb riêng → preload + instantiate đầy đủ; play() tự chạy
-# animation đầu tiên của model đó.
+# Single-model animation system: chỉ giữ idle .glb, run/attack là Tween
+# transform-level overlay (xem block comment phía dưới).
 const MODEL_PATHS_BY_CHAR : Dictionary = {
-	"Sonny": {
-		"idle":   "res://CharacterAsset/Sonny/Sonny Idle.glb",
-		"run":    "res://CharacterAsset/Sonny/Sonny Run.glb",
-		"attack": "res://CharacterAsset/Sonny/Sonny Combo Attack.glb",
-	},
-	"Mike": {
-		"idle":   "res://CharacterAsset/Mike/Mike idle.glb",
-		"run":    "res://CharacterAsset/Mike/Mike Run.glb",
-		"attack": "res://CharacterAsset/Mike/Mike Skill.glb",
-	},
+	"Sonny": { "idle": "res://CharacterAsset/Sonny/Sonny Idle.glb" },
+	"Mike":  { "idle": "res://CharacterAsset/Mike/Mike idle.glb"   },
 }
 
-var models_by_state : Dictionary = {}   # "idle"/"run"/"attack" → Node3D instance
-var current_state   : String     = "idle"
+# Run + attack KHÔNG còn dùng .glb riêng (đã xóa để giảm 46 MB).
+# Thay bằng Tween-based custom animation lên model_node:
+#   ► Hop (Y bobble) khi running — abs(sin) oscillation trong _process
+#   ► Lunge (Z forward + back) khi attack — tween 1-shot
+const HOP_HEIGHT  : float = 0.18
+const HOP_PERIOD  : float = 0.30
+const LUNGE_DIST  : float = 0.40
+const LUNGE_OUT   : float = 0.10
+const LUNGE_BACK  : float = 0.20
+
+var _hop_active : bool = false
+var _hop_time   : float = 0.0
 
 func _ready() -> void:
 	name_label = get_node_or_null("NameLabel")
@@ -189,39 +190,14 @@ func _ready() -> void:
 	# vì lúc _ready chạy character_name vẫn còn rỗng (main.gd gọi
 	# setup_from_preset sau add_child).
 
-# Pre-instantiate 3 models (idle, run, attack), tất cả thành con của Player
-# với cùng transform (scale từ tscn). Hide tất cả trừ idle ban đầu.
-# Mỗi model có AnimationPlayer riêng tự auto-play khi visible.
+# Setup idle animation (model_node được tạo từ tscn với .glb idle).
+# AnimationPlayer trong .glb auto-play idle, set loop. Run/attack được handle
+# bằng Tween trên model_node.position (xem play_run / play_attack).
 func _try_play_default_animation() -> void:
 	if model_node == null: return
-	var base_xform : Transform3D = model_node.transform
-	models_by_state["idle"] = model_node
-	_setup_animation(model_node, true)
+	_setup_idle_animation(model_node)
 
-	# Pre-instantiate run + attack models — visible=false ban đầu, swap khi cần.
-	var paths : Dictionary = MODEL_PATHS_BY_CHAR.get(character_name, {})
-	for state in ["run", "attack"]:
-		if not paths.has(state): continue
-		var path : String = paths[state]
-		if not ResourceLoader.exists(path): continue
-		var packed = load(path)
-		if packed == null: continue
-		var raw_inst = packed.instantiate()
-		var inst : Node3D = raw_inst as Node3D
-		if inst == null:
-			raw_inst.queue_free()
-			continue
-		inst.transform = base_xform
-		inst.visible   = false
-		add_child(inst)
-		models_by_state[state] = inst
-		_setup_animation(inst, state == "run")
-
-	current_state = "idle"
-
-# Hook AnimationPlayer của 1 model: set loop cho idle/run, 1-shot cho attack.
-# Connect animation_finished cho attack → play_idle.
-func _setup_animation(model: Node, should_loop: bool) -> void:
+func _setup_idle_animation(model: Node) -> void:
 	var ap : AnimationPlayer = _find_animation_player(model)
 	if ap == null: return
 	var anims : PackedStringArray = ap.get_animation_list()
@@ -229,13 +205,8 @@ func _setup_animation(model: Node, should_loop: bool) -> void:
 	var first : String = anims[0]
 	var anim : Animation = ap.get_animation(first)
 	if anim:
-		anim.loop_mode = (Animation.LOOP_LINEAR if should_loop else Animation.LOOP_NONE)
-	# Auto play để model không bị T-pose lúc visible
+		anim.loop_mode = Animation.LOOP_LINEAR
 	ap.play(first)
-	# Attack model: khi animation_finished → revert idle
-	if not should_loop:
-		if not ap.animation_finished.is_connected(_on_attack_anim_finished):
-			ap.animation_finished.connect(_on_attack_anim_finished)
 
 func _find_animation_player(node: Node) -> AnimationPlayer:
 	if node is AnimationPlayer:
@@ -247,34 +218,44 @@ func _find_animation_player(node: Node) -> AnimationPlayer:
 	return null
 
 # ─── Public API: play idle / run / attack ─────────────────
+# Skeletal idle vẫn chạy nguyên (loop từ .glb embedded).
+# Run + attack là Tween-based transform animation lên model_node — KHÔNG
+# touch skeleton, chỉ dịch chuyển nguyên model về vị trí khác relative to
+# Player root.
 
 func play_idle() -> void:
-	_swap_state("idle")
+	# Tắt hop, snap model về local origin (Z + Y).
+	_hop_active = false
+	if model_node:
+		model_node.position = Vector3.ZERO
 
 func play_run() -> void:
-	_swap_state("run")
+	# Bắt đầu hop loop (abs sin Y oscillation trong _process).
+	_hop_active = true
+	_hop_time = 0.0
+	if model_node:
+		model_node.position.z = 0.0   # đảm bảo không có lunge tồn dư
 
 func play_attack() -> void:
-	# Restart attack animation từ đầu (vì cùng instance dùng lại)
-	_swap_state("attack")
-	if models_by_state.has("attack"):
-		var ap : AnimationPlayer = _find_animation_player(models_by_state["attack"])
-		if ap and not ap.get_animation_list().is_empty():
-			ap.play(ap.get_animation_list()[0])
+	# Lunge tới phía trước (local +Z, Player đã look_at + flip 180 nên +Z
+	# = hướng nhìn về địch) rồi recoil về vị trí ban đầu.
+	if model_node == null: return
+	_hop_active = false
+	model_node.position.y = 0.0
+	var t := create_tween()
+	t.set_trans(Tween.TRANS_QUAD)
+	t.tween_property(model_node, "position:z",  LUNGE_DIST, LUNGE_OUT) \
+			.set_ease(Tween.EASE_OUT)
+	t.tween_property(model_node, "position:z",  0.0,         LUNGE_BACK) \
+			.set_ease(Tween.EASE_IN)
 
-func _swap_state(new_state: String) -> void:
-	if new_state == current_state: return
-	if not models_by_state.has(new_state): return
-	for s in models_by_state.keys():
-		var m = models_by_state[s]
-		if is_instance_valid(m):
-			m.visible = (s == new_state)
-	current_state = new_state
-
-func _on_attack_anim_finished(_anim_name: String) -> void:
-	# Sau attack → quay về idle
-	if current_state == "attack":
-		play_idle()
+# Hop oscillation suốt thời gian _hop_active (giữa play_run và play_idle).
+func _process(delta: float) -> void:
+	if not _hop_active or model_node == null: return
+	_hop_time += delta
+	var phase : float = _hop_time / HOP_PERIOD * TAU
+	# abs(sin) → bouncing motion luôn ≥ 0 (tránh "chìm" dưới sàn).
+	model_node.position.y = absf(sin(phase)) * HOP_HEIGHT
 
 func refresh_visuals() -> void:
 	# TODO Mốc 5: hiển thị armor ring 3D khi armor > 0

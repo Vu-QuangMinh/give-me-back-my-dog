@@ -29,20 +29,16 @@ const PlayerScenes  : Dictionary = {
 const EnemyScript   = preload("res://enemy.gd")
 const EnemyScene    = preload("res://enemy.tscn")
 
-# Map decorations — .glb scene preload theo key (FLOOR_SCENARIOS.decorations
-# tham chiếu bằng key string). .glb cần được Godot import (mở editor 1 lần).
-const DECO_SCENES : Dictionary = {
-	"house": preload("res://Map/autumn_house.glb"),
-	"grass": preload("res://Map/grass.glb"),
-	"fire":  preload("res://campfire.tscn"),
-}
+# Decorations + outline shells extracted to deco_system.gd (DECO_SCENES const
+# now lives in DecoSystem). _deco holds DecoSystem instance.
+var _deco : DecoSystem = null
 
 # ─── Hex grid ────────────────────────────────────────────────
 const HEX_SIZE     : float = 1.0
 const GRID_COLS    : int   = 12
 const GRID_ROWS    : int   = 8
 const GROUND_Y     : float = 0.2   # = HexTile.TILE_HEIGHT (mặt trên tile, nơi entities đứng)
-const TWEEN_SPEED  : float = 0.18  # giây cho 1 lần move smooth
+const TWEEN_SPEED  : float = 0.36  # giây cho 1 lần move smooth (giảm 50% speed = duration ×2)
 const ACTION_DELAY : float = 0.5   # giây giữa các action liên tiếp của enemy
 
 # Mốc 6.3: DodgeBar minigame
@@ -51,12 +47,8 @@ const DodgeBarScene  = preload("res://dodge_bar.tscn")
 const ChargeBarScene = preload("res://sonny_charge_bar.tscn")
 # Mốc 8.1: Mike timing bar (Draw Shot)
 const TimingBarScene = preload("res://mike_timing_bar.tscn")
-# Mốc 8.3: Bouncing projectile cho Mike's Draw Shot
-const ProjectileScene = preload("res://projectile.tscn")
-# Fixed speeds for enemy-fired projectiles (no decay; tuning is enemy-side)
-const PROJ_ENEMY_SPEED_SLOW   : float = 5.0
-const PROJ_ENEMY_SPEED_NORMAL : float = 8.0
-const PROJ_ENEMY_SPEED_FAST   : float = 14.0
+# Mốc 8.3: ProjectileScene + speeds chuyển sang projectile_system.gd.
+# PROJECTILE_Y giữ ở main vì aim preview + Mike timing dùng (ngoài projectile system).
 const PROJECTILE_Y            : float = 1.10   # độ cao bay (giữa thân character)
 
 # Mốc 9.1: Floor scenarios — composition mỗi floor (column layout + enemies).
@@ -68,15 +60,18 @@ const FLOOR_SCENARIOS : Array = [
 		"is_boss": false,
 		"columns": [],
 		"decorations": [
-			# House + campfire đặt ở CẠNH bắc của map (z < -7), scale nhỏ
-			# (house 30%) để vừa khung view nhưng không lấp grid gameplay.
-			{ "scene": "house", "pos": Vector3(-1.5, 0, -9.5), "scale": 0.30, "rot_y_deg": 270.0 },
-			{ "scene": "fire",  "pos": Vector3( 2.0, 0, -6.0), "scale": 2.0,  "rot_y_deg":   0.0 },
+			# House mới (replaced): đặt vào ô C,0 (col 2, row 0).
+			# Cùng X-line với tile C,0 (X=-5.25), Z lùi về sau grid (-10).
+			{ "scene": "house", "pos": Vector3(-5.25, 0.2, -10.0), "scale": 5.0, "rot_y_deg": 0.0 },
 		],
-		"grass_scatter_pct": 50,   # spawn grass.glb trên 50% hex tiles NORMAL
+		"random_trees": 3,    # cây random trên hex tiles trống (tree = obstacle)
+		"random_fires": 2,    # đám lửa random trên hex tiles trống (fire = -1 HP khi đi qua)
+		"randomize_enemy_positions": true,    # ignore col/row, spawn random
 		"enemies": [
-			{ "type": "grunt", "col": 7, "row": 2 },
-			{ "type": "grunt", "col": 8, "row": 5 },
+			{ "type": "grunt",     "col": 7, "row": 2 },
+			{ "type": "grunt",     "col": 8, "row": 5 },
+			{ "type": "squirrel",  "col": 0, "row": 0 },   # col/row ignored vì randomize=true
+			{ "type": "bulldozer", "col": 0, "row": 0 },
 		],
 	},
 	# Floor 1 — basic: + 1 archer + 1 column
@@ -131,30 +126,8 @@ const FLOOR_SCENARIOS : Array = [
 # else 0 (floor đầu).
 var current_floor : int = 0
 
-# ─── Camera rig ──────────────────────────────────────────────
-const CAM_PITCH_MIN     : float = 30.0
-const CAM_PITCH_MAX     : float = 60.0
-const CAM_PITCH_STEP    : float = 1.5    # phím [ ]
-const CAM_DIST_MIN      : float = 8.0
-const CAM_DIST_MAX      : float = 60.0
-const CAM_DIST_STEP     : float = 1.0    # phím - =
-const CAM_YAW_DRAG      : float = 0.30   # độ/pixel khi RMB-drag (trục X)
-const CAM_PITCH_DRAG    : float = 0.20   # độ/pixel khi RMB-drag (trục Y)
-
-# Reference resolution → tỉ lệ zoom theo size window thực tế
-# Game chạy fullscreen mặc định; monitor 1080p → zoom 1.0, 4K → zoom 2.0
-const REF_WIDTH  : float = 1920.0
-const REF_HEIGHT : float = 1080.0
-
-@export var camera_pitch_deg : float = 41.0
-# yaw=180° → camera đứng phía TÂY của grid (sau lưng Sonny/Mike vốn spawn ở col=0,
-# cạnh tây), nhìn về hướng ĐÔNG nơi enemies ở col=8-10. Player ở foreground, map
-# trải dài về phía trước.
-@export var camera_yaw_deg   : float = 180.0
-@export var camera_distance  : float = 37.0
-
-var rmb_dragging       : bool  = false
-var window_zoom_factor : float = 1.0   # = min(width/REF_WIDTH, height/REF_HEIGHT)
+# Camera state + math + constants in camera_rig.gd. _cam holds rig instance.
+var _cam : CameraRig = null
 
 @onready var camera        : Camera3D    = $Camera3D
 @onready var debug_label   : Label       = $HUD/DebugLabel
@@ -176,7 +149,8 @@ const ITEM_ICONS_BY_CHAR : Dictionary = {
 # ─── Grid state ──────────────────────────────────────────────
 var tiles          : Dictionary = {}   # Vector2i → HexTile
 var column_tiles   : Dictionary = {}   # Vector2i → true
-var fire_pit_tiles : Dictionary = {}   # Vector2i → true
+var fire_pit_tiles : Dictionary = {}   # Vector2i → true (đi qua được, -1 HP)
+var tree_tiles     : Dictionary = {}   # Vector2i → true (obstacle, ko đi qua được)
 
 # ─── Entities ────────────────────────────────────────────────
 var players              : Array = []          # Array of Player nodes
@@ -195,14 +169,9 @@ var mike_timing_bar        : Node    = null
 var mike_timing_target_pos : Vector3 = Vector3.ZERO  # free direction Vector3
 var mike_aim_overlay       : Node    = null   # AimOverlay3D — preview projectile path
 
-# ─── Projectile runtime state ────────────────────────────────
-var active_projectiles  : Array      = []    # Array[Projectile3D]
-var _proj_last_col_hex  : Dictionary = {}    # instance_id → Vector2i (last column bounced)
-var _proj_last_char_hex : Dictionary = {}    # instance_id → Vector2i (last char hex entered)
-var _proj_prev_pos      : Dictionary = {}    # instance_id → Vector3  (world pos previous frame)
-var _proj_bounds_min    : Vector3    = Vector3.ZERO
-var _proj_bounds_max    : Vector3    = Vector3.ZERO
-# Reaction timing — SPACE press timestamp
+# ─── Projectile runtime state (now in projectile_system.gd) ─
+var _proj : ProjectileSystem = null
+# Reaction timing — SPACE press timestamp (used by ProjectileSystem)
 var _space_pressed_at   : float = -100.0
 
 # ─── Turn state ──────────────────────────────────────────────
@@ -219,133 +188,37 @@ var turn_snapshot               : Dictionary = {}     # state ở đầu round �
 var hover_hex       : Vector2i = Vector2i(-1, -1)
 var hover_world_pos : Vector3  = Vector3(NAN, NAN, NAN)   # mouse world XZ — cho Mike aim preview free direction
 
-var camera_anchor : Vector3 = Vector3.ZERO
 var grid_origin   : Vector3 = Vector3.ZERO
 
 # ═══════════════════════════════════════════════════════════
-#  HEX MATH (XZ plane)
+#  HEX MATH WRAPPERS — actual implementation in hex_utils.gd
+#  Wrappers giữ tên function cũ để không phải rename khắp file.
 # ═══════════════════════════════════════════════════════════
 
 func hex_to_world(col: int, row: int) -> Vector3:
-	var x : float = HEX_SIZE * 1.5 * col
-	var z : float = HEX_SIZE * sqrt(3.0) * (row + (0.5 if col % 2 == 1 else 0.0))
-	return Vector3(x, 0.0, z) + grid_origin
+	return HexUtils.hex_to_world(col, row, grid_origin)
 
 func world_to_hex(p: Vector3) -> Vector2i:
-	var best     : Vector2i = Vector2i(-1, -1)
-	var best_d2  : float    = INF
-	for c in range(GRID_COLS):
-		for r in range(GRID_ROWS):
-			var hp : Vector3 = hex_to_world(c, r)
-			var dx : float   = p.x - hp.x
-			var dz : float   = p.z - hp.z
-			var d2 : float   = dx * dx + dz * dz
-			if d2 < best_d2:
-				best_d2 = d2
-				best    = Vector2i(c, r)
-	# Chỉ trả nếu thực sự gần hex (< HEX_SIZE) để tránh chọn sai khi click ngoài lưới
-	if best_d2 > HEX_SIZE * HEX_SIZE * 1.2:
-		return Vector2i(-1, -1)
-	return best
+	return HexUtils.world_to_hex(p, GRID_COLS, GRID_ROWS, grid_origin)
 
 func _grid_center_offset() -> Vector3:
-	var min_p := Vector3(INF, 0.0, INF)
-	var max_p := Vector3(-INF, 0.0, -INF)
-	for c in range(GRID_COLS):
-		for r in range(GRID_ROWS):
-			var p : Vector3 = Vector3(
-				HEX_SIZE * 1.5 * c,
-				0.0,
-				HEX_SIZE * sqrt(3.0) * (r + (0.5 if c % 2 == 1 else 0.0))
-			)
-			if p.x < min_p.x: min_p.x = p.x
-			if p.z < min_p.z: min_p.z = p.z
-			if p.x > max_p.x: max_p.x = p.x
-			if p.z > max_p.z: max_p.z = p.z
-	return -(min_p + max_p) * 0.5
+	return HexUtils.grid_center_offset(GRID_COLS, GRID_ROWS)
 
 func _hex_dist(c1: int, r1: int, c2: int, r2: int) -> int:
-	var to_cube = func(c, r):
-		var x = c
-		var z = r - (c - (c & 1)) / 2
-		return Vector3i(x, -x - z, z)
-	var a = to_cube.call(c1, r1)
-	var b = to_cube.call(c2, r2)
-	return maxi(maxi(abs(a.x - b.x), abs(a.y - b.y)), abs(a.z - b.z))
+	return HexUtils.hex_dist(c1, r1, c2, r2)
 
-# ── Hex line drawing & line-of-sight ────────────────────────
-# Trả về list các hex từ (c1,r1) đến (c2,r2) bao gồm cả 2 đầu.
-# Dùng cube interpolation + cube_round (chuẩn redblobgames).
 func _hex_line(c1: int, r1: int, c2: int, r2: int) -> Array:
-	var n : int = _hex_dist(c1, r1, c2, r2)
-	var path : Array = []
-	if n <= 0:
-		path.append(Vector2i(c1, r1))
-		return path
-	var a : Vector3 = _to_cube_f(c1, r1)
-	var b : Vector3 = _to_cube_f(c2, r2)
-	# Epsilon nudge để ray đúng tâm cạnh không bị tie ngẫu nhiên
-	a += Vector3(1e-6, 2e-6, -3e-6)
-	b += Vector3(1e-6, 2e-6, -3e-6)
-	for i in range(n + 1):
-		var t : float = float(i) / float(n)
-		var rounded : Vector3 = _cube_round(a.lerp(b, t))
-		path.append(_from_cube_f(rounded))
-	return path
+	return HexUtils.hex_line(c1, r1, c2, r2)
 
-func _to_cube_f(col: int, row: int) -> Vector3:
-	var x : float = float(col)
-	var z : float = float(row - (col - (col & 1)) / 2)
-	var y : float = -x - z
-	return Vector3(x, y, z)
-
-func _from_cube_f(c: Vector3) -> Vector2i:
-	var col : int = int(c.x)
-	var row : int = int(c.z) + (col - (col & 1)) / 2
-	return Vector2i(col, row)
-
-func _cube_round(c: Vector3) -> Vector3:
-	var rx : float = round(c.x)
-	var ry : float = round(c.y)
-	var rz : float = round(c.z)
-	var dx : float = abs(rx - c.x)
-	var dy : float = abs(ry - c.y)
-	var dz : float = abs(rz - c.z)
-	if dx > dy and dx > dz:
-		rx = -ry - rz
-	elif dy > dz:
-		ry = -rx - rz
-	else:
-		rz = -rx - ry
-	return Vector3(rx, ry, rz)
-
-# Line-of-sight: từ (c1,r1) đến (c2,r2) — chỉ column chặn.
-# Bỏ qua start và end. Fire pits + entities không chặn (entity sẽ hấp thụ projectile
-# ở target, còn enemies trên đường đi không chặn nhau).
 func _has_line_of_sight(c1: int, r1: int, c2: int, r2: int) -> bool:
-	var path : Array = _hex_line(c1, r1, c2, r2)
-	for i in range(1, path.size() - 1):
-		var hex : Vector2i = path[i]
-		if hex in column_tiles:
-			return false
-	return true
+	return HexUtils.has_line_of_sight(c1, r1, c2, r2, column_tiles)
 
 func _get_neighbors(col: int, row: int) -> Array:
-	var dirs = [[1,0],[-1,0],[0,-1],[0,1],[1,-1],[-1,-1]] if col % 2 == 0 \
-			 else [[1,0],[-1,0],[0,-1],[0,1],[1,1],[-1,1]]
-	var result : Array = []
-	for d in dirs:
-		var nc = col + d[0]
-		var nr = row + d[1]
-		if nc >= 0 and nc < GRID_COLS and nr >= 0 and nr < GRID_ROWS:
-			result.append(Vector2i(nc, nr))
-	return result
+	return HexUtils.get_neighbors(col, row, GRID_COLS, GRID_ROWS)
 
 func is_valid_and_passable(col: int, row: int) -> bool:
-	var key = Vector2i(col, row)
-	if not tiles.has(key):  return false
-	if key in column_tiles: return false
-	return true
+	if Vector2i(col, row) in tree_tiles: return false
+	return HexUtils.is_valid_and_passable(col, row, tiles, column_tiles)
 
 # ═══════════════════════════════════════════════════════════
 #  LIFECYCLE
@@ -355,19 +228,32 @@ func _ready() -> void:
 	# Mốc 9: đọc current_floor từ Engine.meta (giữ tiến độ qua scene change).
 	if Engine.has_meta("current_floor"):
 		current_floor = int(Engine.get_meta("current_floor"))
+	# Spawn subsystems TRƯỚC mọi code khác để tránh null deref.
+	_cam = CameraRig.new()
+	_cam.name = "CameraRig"
+	add_child(_cam)
+	_cam.setup($Camera3D)
+	_deco = DecoSystem.new()
+	_deco.name = "DecoSystem"
+	add_child(_deco)
+	_deco.setup(self)
+	_proj = ProjectileSystem.new()
+	_proj.name = "ProjectileSystem"
+	add_child(_proj)
+	_proj.setup(self)
 	grid_origin   = _grid_center_offset()
-	camera_anchor = Vector3.ZERO
-	_proj_bounds_min = Vector3(grid_origin.x - 0.6, PROJECTILE_Y,
-		grid_origin.z - 0.6)
-	_proj_bounds_max = Vector3(
-		grid_origin.x + HEX_SIZE * 1.5 * float(GRID_COLS) + 0.6, PROJECTILE_Y,
-		grid_origin.z + HEX_SIZE * sqrt(3.0) * float(GRID_ROWS) + 0.6)
+	_proj.compute_bounds(grid_origin, GRID_COLS, GRID_ROWS)
 	_build_grid()
+	_build_sidewalk()
 	_setup_demo_columns()   # Mốc 9.1: load từ FLOOR_SCENARIOS[current_floor]
 	_setup_decorations()    # Mốc 9.1: load .glb decorations (cây, etc.)
 	_setup_coord_grid()     # Debug overlay (F4 toggle)
 	_spawn_players()
 	_spawn_enemies()
+	_apply_outline_shells_to_entities()   # cel-shaded viền đen
+	_place_border_trees()                  # cây cố định row 7 (B,D,F,H,J,L)
+	_scatter_random_trees()                # cây random trên hex tiles trống
+	_scatter_random_fires()                # đám lửa random trên hex tiles trống
 	_face_all_players_to_enemies()
 	_update_valid_moves()
 	_save_turn_snapshot()
@@ -466,14 +352,9 @@ func _on_hud_backpack() -> void:
 
 func _on_viewport_resized() -> void:
 	# Dùng kích thước OS window thay vì viewport size — khi pixelate_root
-	# wrap main.tscn vào SubViewport (vd 480×270), camera zoom phải tính
-	# theo screen thật (1920×1080) chứ không phải SubViewport low-res.
-	var size : Vector2 = Vector2(get_window().size)
-	var sx : float = size.x / REF_WIDTH
-	var sy : float = size.y / REF_HEIGHT
-	# Lấy min để cả 2 chiều của reference vẫn fit (không bị crop quá)
-	window_zoom_factor = maxf(0.05, minf(sx, sy))
-	_update_camera()
+	# wrap main.tscn vào SubViewport, camera zoom phải tính theo screen
+	# thật (1920×1080) chứ không phải SubViewport low-res.
+	if _cam: _cam.recompute_zoom_factor(Vector2(get_window().size))
 	_refresh_debug()
 
 # ═══════════════════════════════════════════════════════════
@@ -486,9 +367,36 @@ func _build_grid() -> void:
 			var key  : Vector2i = Vector2i(col, row)
 			var tile           = HexTileScene.instantiate()
 			add_child(tile)
-			tile.setup(col, row, HexTileScript.Type.NORMAL)
+			# Row 0 (toàn bộ A-L) + Row 7 từ A,7..I,7 (col 0..8): ô cỏ.
+			# Còn lại: NORMAL (nâu).
+			var t = HexTileScript.Type.NORMAL
+			if row == 0:
+				t = HexTileScript.Type.GRASS
+			elif row == GRID_ROWS - 1 and col <= 8:
+				t = HexTileScript.Type.GRASS
+			tile.setup(col, row, t)
 			tile.position = hex_to_world(col, row)
 			tiles[key] = tile
+
+# Vỉa hè: mặt phẳng xám rộng phủ quanh hex grid (extend ngoài bounds) →
+# user đặt house/tree/car lên đó. Position Y=0 (dưới hex tiles, hex top
+# tại Y=0.2 → vỉa hè vẫn lộ ra ở rìa ngoài grid).
+const SIDEWALK_SIZE  : Vector2 = Vector2(40.0, 30.0)
+const SIDEWALK_COLOR : Color   = Color(0.55, 0.55, 0.55)
+const SIDEWALK_Y     : float   = 0.0
+
+func _build_sidewalk() -> void:
+	var plane := MeshInstance3D.new()
+	plane.name = "Sidewalk"
+	var pm := PlaneMesh.new()
+	pm.size = SIDEWALK_SIZE
+	plane.mesh = pm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = SIDEWALK_COLOR
+	mat.roughness    = 0.92
+	plane.material_override = mat
+	plane.position = Vector3(0.0, SIDEWALK_Y, 0.0)
+	add_child(plane)
 
 func _setup_demo_columns() -> void:
 	# Mốc 9.1: load columns từ FLOOR_SCENARIOS theo current_floor.
@@ -509,189 +417,12 @@ func _setup_coord_grid() -> void:
 	_coord_grid.name = "CoordGrid"
 	add_child(_coord_grid)
 
-func _setup_decorations() -> void:
-	# Instance .glb scenes (cỏ, nhà, etc.) ở vị trí world cố định.
-	# Decorations chỉ trang trí, không tham gia gameplay (không block, không LOS).
-	_ensure_deco_holder()
-	var scenario : Dictionary = _current_scenario()
-	var decos : Array = scenario.get("decorations", [])
-	for d in decos:
-		var key : String = d.get("scene", "")
-		if not DECO_SCENES.has(key): continue
-		# Campfire build mesh+particles trong _ready → KHÔNG duplicate được
-		# (sẽ build 2 lần, particles bị reset). Instantiate fresh.
-		# .glb (house/grass) thì cache prefab + duplicate (share resources).
-		var inst : Node3D
-		var s : float = d.get("scale", 1.0)
-		if key == "fire":
-			inst = DECO_SCENES[key].instantiate() as Node3D
-			# Particles dùng world coords → Node3D.scale KHÔNG ảnh hưởng size
-			# emit/quad/light. Pass scale từ scenario sang fire_size_mult
-			# (đã handle multiply lên mọi param trong campfire.gd).
-			if inst:
-				inst.set("fire_size_mult", s)
-			s = 1.0   # đừng apply Node3D scale nữa, tránh double-scale logs/ember
-		else:
-			var prefab : Node3D = _get_deco_prefab(key)
-			if prefab == null: continue
-			inst = prefab.duplicate() as Node3D
-		if inst == null: continue
-		inst.visible = true
-		inst.position = d.get("pos", Vector3.ZERO)
-		inst.scale = Vector3(s, s, s)
-		inst.rotation_degrees = Vector3(0, d.get("rot_y_deg", 0.0), 0)
-		add_child(inst)
-		print("[deco] %s spawned at %s" % [key, str(inst.position)])
-		if key == "house":
-			_try_ignite_house_car(inst)
-	# Grass scatter — spawn grass.glb trên N% hex tiles NORMAL (mỗi tile 1 cụm).
-	var pct : int = int(scenario.get("grass_scatter_pct", 0))
-	if pct > 0:
-		_scatter_grass(pct)
-
-# ─── Grass scatter ──────────────────────────────────────────
-# Vừa fit hex tile (HEX_SIZE=1.0). Lod_bias thấp + visibility range
-# giảm cost render khi nhiều cụm trên màn hình.
-const GRASS_LOD_BIAS         : float = 0.25
-const GRASS_VIS_RANGE_END    : float = 30.0
-const GRASS_VIS_RANGE_MARGIN : float = 6.0
-const GRASS_HEX_FIT_RATIO    : float = 0.85   # 85% đường kính hex
-
-func _scatter_grass(pct: int) -> void:
-	var prefab : Node3D = _get_deco_prefab("grass")
-	if prefab == null: return
-	var bbox : AABB = _measure_combined_aabb(prefab)
-	var max_dim : float = maxf(bbox.size.x, bbox.size.z)
-	if max_dim < 0.001:
-		print("[grass] AABB invalid — skip scatter")
-		return
-	# Scale cụm cỏ vừa fit hex (đường kính hex ≈ 2*HEX_SIZE).
-	var fit_scale : float = (HEX_SIZE * 2.0 * GRASS_HEX_FIT_RATIO) / max_dim
-	var spawned : int = 0
-	for key in tiles.keys():
-		var tile = tiles[key]
-		if tile.tile_type != HexTileScript.Type.NORMAL: continue
-		if randf() * 100.0 > pct: continue
-		var inst : Node3D = prefab.duplicate() as Node3D
-		if inst == null: continue
-		inst.visible = true
-		var p : Vector3 = hex_to_world(int(key.x), int(key.y))
-		p.y = GROUND_Y   # mặt trên hex tile (= HexTile.TILE_HEIGHT)
-		inst.position = p
-		inst.scale = Vector3(fit_scale, fit_scale, fit_scale)
-		inst.rotation_degrees = Vector3(0, randf() * 360.0, 0)
-		_apply_grass_runtime_opts(inst)
-		add_child(inst)
-		spawned += 1
-	print("[grass] scattered %d clumps (pct=%d, fit_scale=%.3f)" % [spawned, pct, fit_scale])
-
-# Recursive: gather AABB của tất cả MeshInstance3D children, merge thành 1 AABB
-# tổng. Prefab phải đã trong scene tree → global_transform chính xác.
-func _measure_combined_aabb(root: Node) -> AABB:
-	var collected : Array = []
-	_collect_mesh_aabbs(root, collected)
-	if collected.is_empty(): return AABB()
-	var combined : AABB = collected[0]
-	for i in range(1, collected.size()):
-		combined = combined.merge(collected[i])
-	return combined
-
-func _collect_mesh_aabbs(node: Node, out: Array) -> void:
-	if node is MeshInstance3D:
-		var mi : MeshInstance3D = node
-		out.append(mi.global_transform * mi.get_aabb())
-	for c in node.get_children():
-		_collect_mesh_aabbs(c, out)
-
-# ─── Car ignition ───────────────────────────────────────────
-# Scan node names trong autumn_house tìm node giống "ô tô".
-# Match case-insensitive với keyword phổ biến. Nếu không thấy → in cây
-# node ra console để user kiểm tra.
-const CAR_KEYWORDS : Array = [
-	"car", "auto", "sedan", "suv", "truck", "vehicle",
-]
-
-func _try_ignite_house_car(house: Node3D) -> void:
-	var car : Node3D = _find_node_by_keywords(house, CAR_KEYWORDS)
-	if car == null:
-		print("[fire/car] không tìm thấy node ô tô — cây node của house:")
-		_print_subtree(house, 0)
-		return
-	# Đo AABB world-space của car và mọi mesh con bên trong.
-	var aabb : AABB = _measure_combined_aabb(car)
-	var max_dim : float = maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
-	if max_dim < 0.001:
-		print("[fire/car] tìm thấy '%s' nhưng AABB rỗng" % car.name)
-		return
-	var center : Vector3 = aabb.position + aabb.size * 0.5
-	# Spawn Campfire ở tâm car, scale theo dimensions car để bao trùm.
-	var fire : Node3D = DECO_SCENES["fire"].instantiate() as Node3D
-	if fire == null: return
-	fire.position = center
-	# fire_size_mult ≈ kích thước lớn nhất của car → flames spread bao trùm.
-	fire.set("fire_size_mult", max_dim * 1.1)
-	fire.set("black_smoke",    true)
-	fire.set("no_logs",        true)
-	add_child(fire)
-	print("[fire/car] đốt '%s' tại %s, max_dim=%.2f, mult=%.2f" \
-			% [car.name, str(center), max_dim, max_dim * 1.1])
-
-func _find_node_by_keywords(root: Node, keywords: Array) -> Node3D:
-	var stack : Array = [root]
-	while not stack.is_empty():
-		var n : Node = stack.pop_back()
-		if n is Node3D:
-			var nm : String = String(n.name).to_lower()
-			for kw in keywords:
-				if kw in nm:
-					return n
-		for c in n.get_children():
-			stack.append(c)
-	return null
-
-func _print_subtree(node: Node, depth: int) -> void:
-	var indent : String = "  ".repeat(depth)
-	print("%s%s [%s]" % [indent, node.name, node.get_class()])
-	for c in node.get_children():
-		_print_subtree(c, depth + 1)
-
-# Áp dụng tối ưu lên mọi MeshInstance3D bên trong instance:
-# ► lod_bias thấp → ưu tiên LOD đơn giản hơn (hiệu lực nếu .glb có LOD
-#   được generate ở import, default Godot 4 = ON).
-# ► visibility_range_end → cull instance khi camera xa, giảm draw call.
-# Lưu ý: lod_bias chỉ giảm poly khi DISTANCE xa. Để giảm 80% poly thực sự
-# ở mọi khoảng cách, cần Blender Decimate trước khi export .glb.
-func _apply_grass_runtime_opts(node: Node) -> void:
-	if node is MeshInstance3D:
-		var mi : MeshInstance3D = node
-		mi.lod_bias                    = GRASS_LOD_BIAS
-		mi.visibility_range_end        = GRASS_VIS_RANGE_END
-		mi.visibility_range_end_margin = GRASS_VIS_RANGE_MARGIN
-	for c in node.get_children():
-		_apply_grass_runtime_opts(c)
-
-# Cache prefabs (1 cây từ forest) làm con của _deco_holder ẩn → tránh leak
-# khi scene main reload (holder free thì prefab free theo).
-var _deco_prefabs : Dictionary = {}
-var _deco_holder  : Node3D     = null
-
-func _ensure_deco_holder() -> void:
-	if _deco_holder and is_instance_valid(_deco_holder): return
-	_deco_holder = Node3D.new()
-	_deco_holder.name = "DecoPrefabHolder"
-	_deco_holder.visible = false
-	add_child(_deco_holder)
-
-func _get_deco_prefab(key: String) -> Node3D:
-	if _deco_prefabs.has(key):
-		return _deco_prefabs[key]
-	if not DECO_SCENES.has(key): return null
-	var prefab : Node3D = DECO_SCENES[key].instantiate() as Node3D
-	if prefab:
-		prefab.visible = false
-		_deco_holder.add_child(prefab)
-	_deco_prefabs[key] = prefab
-	return prefab
+# ─── Decoration wrappers (delegate tới _deco) ────────────────
+func _setup_decorations() -> void:                  if _deco: _deco.setup_decorations()
+func _scatter_random_trees() -> void:               if _deco: _deco.scatter_random_trees()
+func _scatter_random_fires() -> void:               if _deco: _deco.scatter_random_fires()
+func _place_border_trees() -> void:                 if _deco: _deco.place_border_trees()
+func _apply_outline_shells_to_entities() -> void:   if _deco: _deco.apply_outline_shells_to_entities()
 
 func _current_scenario() -> Dictionary:
 	var idx : int = clampi(current_floor, 0, FLOOR_SCENARIOS.size() - 1)
@@ -852,10 +583,61 @@ func _spawn_enemies() -> void:
 	# Mốc 9.1: load enemies từ FLOOR_SCENARIOS theo current_floor.
 	var scenario : Dictionary = _current_scenario()
 	var spawn_list : Array = scenario.get("enemies", [])
+	var randomize : bool = bool(scenario.get("randomize_enemy_positions", false))
+	var used_tiles : Dictionary = {}
 	for entry in spawn_list:
-		var key := Vector2i(entry["col"], entry["row"])
+		var col : int = int(entry["col"])
+		var row : int = int(entry["row"])
+		if randomize:
+			var picked : Vector2i = _random_enemy_spawn_tile(used_tiles)
+			if picked.x >= 0:
+				col = picked.x
+				row = picked.y
+				used_tiles[picked] = true
+		var key := Vector2i(col, row)
 		if key in column_tiles: continue
-		_spawn_enemy(entry["type"], entry["col"], entry["row"])
+		var enemy : Node = _spawn_enemy(entry["type"], col, row)
+		if enemy:
+			_face_enemy_to_nearest_player(enemy)
+
+# Random tile NORMAL trống, cách player ≥ 3 hex (không spawn quá gần).
+# Né player_positions, column_tiles, used_tiles, scatter tile.
+const ENEMY_SPAWN_MIN_DIST : int = 3
+func _random_enemy_spawn_tile(used: Dictionary) -> Vector2i:
+	var candidates : Array = []
+	for k in tiles.keys():
+		if tiles[k].tile_type != HexTileScript.Type.NORMAL: continue
+		if k in column_tiles: continue
+		if used.has(k): continue
+		var skip : bool = false
+		for pos in player_positions:
+			if _hex_dist(k.x, k.y, pos.x, pos.y) < ENEMY_SPAWN_MIN_DIST:
+				skip = true
+				break
+		if skip: continue
+		candidates.append(k)
+	if candidates.is_empty(): return Vector2i(-1, -1)
+	return candidates.pick_random()
+
+# Quay enemy về player gần nhất (Mixamo +Z face → look_at + flip 180).
+func _face_enemy_to_nearest_player(enemy: Node) -> void:
+	if players.is_empty(): return
+	var best_idx : int = -1
+	var best_d   : int = 9999
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		var d : int = _hex_dist(enemy.grid_col, enemy.grid_row,
+				players[i].grid_col, players[i].grid_row)
+		if d < best_d:
+			best_d = d
+			best_idx = i
+	if best_idx < 0: return
+	var p_pos : Vector3 = players[best_idx].position
+	var e_pos : Vector3 = enemy.position
+	if absf(p_pos.x - e_pos.x) < 0.001 and absf(p_pos.z - e_pos.z) < 0.001:
+		return
+	enemy.look_at(Vector3(p_pos.x, e_pos.y, p_pos.z), Vector3.UP)
+	enemy.rotate_object_local(Vector3.UP, PI)
 
 func _spawn_enemy(type_key: String, col: int, row: int) -> Node:
 	var preset = EnemyScript.ENEMY_PRESETS[type_key]
@@ -887,9 +669,11 @@ func _update_valid_moves() -> void:
 	if players.is_empty(): return
 	if not players[current_player_index].can_act(): return   # hết action → không hiện ô xanh
 
-	# Tile bị chặn = column + enemy + player khác (còn sống)
+	# Tile bị chặn = column + tree (obstacle) + enemy + player khác (còn sống)
 	var blocked : Dictionary = {}
 	for key in column_tiles:
+		blocked[key] = true
+	for key in tree_tiles:
 		blocked[key] = true
 	for e in enemies:
 		blocked[Vector2i(e.grid_col, e.grid_row)] = true
@@ -952,10 +736,15 @@ func _can_attack_target(from_col: int, from_row: int, to_col: int, to_row: int) 
 
 func _move_entity_smooth(entity: Node, target_col: int, target_row: int) -> void:
 	var target_pos := entity_position(target_col, target_row)
+	# Bật walk anim trước khi tween (entity nào có anim_set_walking — vd Grunt).
+	if entity.has_method("anim_set_walking"):
+		entity.anim_set_walking(true)
 	var tween      := create_tween()
 	tween.set_ease(Tween.EASE_OUT)
 	tween.set_trans(Tween.TRANS_CUBIC)
 	tween.tween_property(entity, "position", target_pos, TWEEN_SPEED)
+	if entity.has_method("anim_set_walking"):
+		tween.tween_callback(func(): entity.anim_set_walking(false))
 
 func _move_player(dest: Vector2i) -> void:
 	var current_player = players[current_player_index]
@@ -970,9 +759,8 @@ func _move_player(dest: Vector2i) -> void:
 	if current_player.has_method("play_run"):
 		current_player.play_run()
 	var move_pos : Vector3 = entity_position(dest.x, dest.y)
-	# Tween duration scale theo distance (khoảng 0.25s/hex), tối thiểu 0.30s
-	# để run animation kịp chạy 1 chu kỳ rõ ràng trước khi về idle.
-	var move_dur : float = maxf(0.30, 0.25 * float(dist))
+	# Tween duration scale theo distance (giảm 50% speed = duration ×2).
+	var move_dur : float = maxf(0.60, 0.50 * float(dist))
 	var tween    := create_tween()
 	tween.set_ease(Tween.EASE_OUT)
 	tween.set_trans(Tween.TRANS_CUBIC)
@@ -983,6 +771,7 @@ func _move_player(dest: Vector2i) -> void:
 		tween.tween_callback(current_player.play_idle)
 	current_player.use_action()
 	_face_all_players_to_enemies()   # quay mặt về địch gần nhất
+	_check_fire_step_player(current_player_index)   # ô lửa: -1 HP
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_debug()
@@ -1307,336 +1096,24 @@ func _on_mike_timing_resolved(result: String, target_pos: Vector3) -> void:
 	_refresh_hud()
 	_check_floor_clear()
 
-# ═══════════════════════════════════════════════════════════
-#  PROJECTILE FIRE — Mốc 8.3.3
-# ═══════════════════════════════════════════════════════════
-
-# Build BounceTracer3D với grid bounds + columns + enemy positions, trace từ
-# shooter đến target_pos (free Vector3 trên XZ plane). Trả { segs, hit_hexes }.
+# ─── Projectile wrappers (delegate tới _proj) ───────────────
 func _compute_projectile_trace(shooter, target_pos: Vector3) -> Dictionary:
-	var tracer := BounceTracer3D.new()
-	tracer.bounds_min = Vector3(
-		grid_origin.x - 0.6,
-		PROJECTILE_Y,
-		grid_origin.z - 0.6)
-	tracer.bounds_max = Vector3(
-		grid_origin.x + HEX_SIZE * 1.5 * float(GRID_COLS) + 0.6,
-		PROJECTILE_Y,
-		grid_origin.z + HEX_SIZE * sqrt(3.0) * float(GRID_ROWS) + 0.6)
-	tracer.columns = column_tiles.duplicate()
-	var enemy_dict : Dictionary = {}
-	for e in enemies:
-		if is_instance_valid(e) and e.hp > 0:
-			enemy_dict[Vector2i(e.grid_col, e.grid_row)] = true
-	for i in range(players.size()):
-		if players[i] != shooter:
-			enemy_dict[player_positions[i]] = true
-	tracer.entities = enemy_dict
-	tracer.hex_to_world = self.hex_to_world
-	tracer.world_to_hex = func(p: Vector3) -> Vector2i: return world_to_hex(p)
-	tracer.launch_speed    = shooter.proj_launch_speed
-	tracer.decay_rate      = shooter.proj_decay_rate
-	tracer.min_speed       = shooter.proj_min_speed
-	tracer.negative_bounce = shooter.proj_neg_bounce
-	var shooter_pos : Vector3 = shooter.position
-	var dir : Vector3 = Vector3(target_pos.x - shooter_pos.x, 0.0,
-		target_pos.z - shooter_pos.z).normalized()
-	var start : Vector3 = Vector3(shooter_pos.x, PROJECTILE_Y, shooter_pos.z)
-	var exclude_hexes : Dictionary = {
-		Vector2i(shooter.grid_col, shooter.grid_row): true
-	}
-	# stop_on_hit = false → projectile bounce off enemy (giống wall/column);
-	# multiple enemies trên path đều ăn damage; speed decay tự dừng sau vài bounce.
-	return tracer.trace(start, dir, false, exclude_hexes)
+	return _proj.compute_projectile_trace(shooter, target_pos) if _proj else {}
 
-
-# ═══════════════════════════════════════════════════════════
-#  PROJECTILE SYSTEM — real-time physics
-# ═══════════════════════════════════════════════════════════
-
-# Spawn and register a projectile. Returns the node.
 func _fire_projectile(owner_nd: Node, start_pos: Vector3, direction: Vector3,
 		damage: float, uses_decay: bool, neg_bounce: float,
 		speed: float) -> Projectile3D:
-	var proj : Projectile3D = ProjectileScene.instantiate()
-	proj.proj_speed      = speed
-	proj.proj_direction  = Vector3(direction.x, 0.0, direction.z).normalized()
-	proj.proj_damage     = damage
-	proj.negative_bounce = neg_bounce
-	proj.owner_node      = owner_nd
-	proj.uses_decay      = uses_decay
-	add_child(proj)
-	proj.position = Vector3(start_pos.x, PROJECTILE_Y, start_pos.z)
-	active_projectiles.append(proj)
-	proj.projectile_died.connect(_on_proj_died.bind(proj))
-	return proj
+	return _proj.fire(owner_nd, start_pos, direction, damage, uses_decay,
+			neg_bounce, speed) if _proj else null
 
-func _on_proj_died(proj: Projectile3D) -> void:
-	active_projectiles.erase(proj)
-	var pid : int = proj.get_instance_id()
-	_proj_last_col_hex.erase(pid)
-	_proj_last_char_hex.erase(pid)
-	_proj_prev_pos.erase(pid)
-
-# Enemy fires a projectile at target player using attack dict data.
 func _fire_enemy_projectile(enemy: Node, target_idx: int, attack: Dictionary) -> Projectile3D:
-	var target_p = players[target_idx]
-	var dir := Vector3(target_p.position.x - enemy.position.x, 0.0,
-		target_p.position.z - enemy.position.z).normalized()
-	var start := Vector3(enemy.position.x, PROJECTILE_Y, enemy.position.z)
-	var dmg    : float = float(attack.get("damage", 1))
-	var speed_key : String = str(attack.get("speed", "normal"))
-	var spd : float = {
-		"slow":   PROJ_ENEMY_SPEED_SLOW,
-		"fast":   PROJ_ENEMY_SPEED_FAST,
-	}.get(speed_key, PROJ_ENEMY_SPEED_NORMAL)
-	return _fire_projectile(enemy, start, dir, dmg, false, 9999.0, spd)
+	return _proj.fire_enemy_projectile(enemy, target_idx, attack) if _proj else null
 
-# Fire Mike's caught projectiles 0.3s apart in the shot direction (background).
 func _fire_mike_caught_projectiles_async(shooter: Node, direction: Vector3) -> void:
-	var caught: Array = shooter.caught_projectiles.duplicate()
-	shooter.caught_projectiles.clear()
-	for cd in caught:
-		await get_tree().create_timer(0.30).timeout
-		if not is_instance_valid(shooter): break
-		var start := Vector3(shooter.position.x, PROJECTILE_Y, shooter.position.z)
-		_fire_projectile(shooter, start, direction,
-			float(cd.get("damage", 1.0)),
-			bool(cd.get("uses_decay", false)),
-			float(cd.get("neg_bounce", 9999.0)),
-			float(cd.get("speed", PROJ_ENEMY_SPEED_NORMAL)))
+	if _proj: _proj.fire_mike_caught_projectiles_async(shooter, direction)
 
-# Per-frame: wall → column → character collision for all active projectiles.
-func _process_projectiles(_delta: float) -> void:
-	for proj in active_projectiles.duplicate():
-		if not is_instance_valid(proj): continue
-		var pid      : int     = proj.get_instance_id()
-		var cur_pos  : Vector3 = proj.position
-		var prev_pos : Vector3 = _proj_prev_pos.get(pid, cur_pos)
-		_check_proj_wall(proj, prev_pos)
-		if not is_instance_valid(proj): continue
-		_check_proj_column(proj, cur_pos, prev_pos)
-		if not is_instance_valid(proj): continue
-		_check_proj_characters(proj, cur_pos, prev_pos)
-		# Save after all repositioning so prev_pos next frame reflects the circle crossing.
-		if is_instance_valid(proj):
-			_proj_prev_pos[pid] = proj.position
-
-# Exact point where segment from_pos→to_pos first enters the circle (radius, center XZ).
-
-# Exact world position where the segment from_pos→to_pos crosses the grid boundary.
-func _wall_crossing_point(from_pos: Vector3, to_pos: Vector3) -> Vector3:
-	var t  : float = 1.0
-	var dx : float = to_pos.x - from_pos.x
-	var dz : float = to_pos.z - from_pos.z
-	if dx > 0.0001 and to_pos.x > _proj_bounds_max.x:
-		t = minf(t, (_proj_bounds_max.x - from_pos.x) / dx)
-	elif dx < -0.0001 and to_pos.x < _proj_bounds_min.x:
-		t = minf(t, (_proj_bounds_min.x - from_pos.x) / dx)
-	if dz > 0.0001 and to_pos.z > _proj_bounds_max.z:
-		t = minf(t, (_proj_bounds_max.z - from_pos.z) / dz)
-	elif dz < -0.0001 and to_pos.z < _proj_bounds_min.z:
-		t = minf(t, (_proj_bounds_min.z - from_pos.z) / dz)
-	t = clampf(t, 0.0, 1.0)
-	return Vector3(from_pos.x + t * dx, PROJECTILE_Y, from_pos.z + t * dz)
-
-func _check_proj_wall(proj: Projectile3D, prev_pos: Vector3) -> void:
-	var p := proj.position
-	if p.x >= _proj_bounds_min.x and p.x <= _proj_bounds_max.x \
-			and p.z >= _proj_bounds_min.z and p.z <= _proj_bounds_max.z:
-		return
-	var normal := Vector3.ZERO
-	if   p.x < _proj_bounds_min.x: normal.x =  1.0
-	elif p.x > _proj_bounds_max.x: normal.x = -1.0
-	if   p.z < _proj_bounds_min.z: normal.z =  1.0
-	elif p.z > _proj_bounds_max.z: normal.z = -1.0
-	if normal.length_squared() < 0.001: normal = Vector3.RIGHT
-	proj.position = _wall_crossing_point(prev_pos, p)
-	proj.bounce_off_surface(normal.normalized())
-
-func _check_proj_column(proj: Projectile3D,
-		cur_pos: Vector3, _prev_pos: Vector3) -> void:
-	var pid      : int      = proj.get_instance_id()
-	var cur_hex  : Vector2i = world_to_hex(cur_pos)
-	var last_col : Vector2i = _proj_last_col_hex.get(pid, Vector2i(-9999, -9999))
-	if cur_hex in column_tiles:
-		if cur_hex != last_col:
-			_proj_last_col_hex[pid] = cur_hex
-			var col_c : Vector3 = hex_to_world(cur_hex.x, cur_hex.y)
-			var n : Vector3 = Vector3(cur_pos.x - col_c.x, 0.0, cur_pos.z - col_c.z)
-			if n.length_squared() < 0.0001: n = Vector3.FORWARD
-			proj.bounce_off_surface(n.normalized())
-	else:
-		_proj_last_col_hex.erase(pid)
-
-func _check_proj_characters(proj: Projectile3D,
-		cur_pos: Vector3, _prev_pos: Vector3) -> void:
-	var pid     : int      = proj.get_instance_id()
-	var cur_hex : Vector2i = world_to_hex(cur_pos)
-	var last    : Vector2i = _proj_last_char_hex.get(pid, Vector2i(-9999, -9999))
-
-	# Check enemies
-	var hit_enemy : Node = _get_enemy_at(cur_hex)
-	if hit_enemy != null and hit_enemy != proj.owner_node and cur_hex != last:
-		_proj_last_char_hex[pid] = cur_hex
-		_handle_enemy_proj_hit(proj, hit_enemy)
-		return
-
-	# Check players
-	for i in range(players.size()):
-		if player_positions[i] == cur_hex and players[i] != proj.owner_node and cur_hex != last:
-			_proj_last_char_hex[pid] = cur_hex
-			_handle_player_proj_contact_async(proj, i)   # background coroutine
-			return
-
-	if cur_hex != last:
-		_proj_last_char_hex.erase(pid)
-
-# Enemy hit: damage + bounce off hex border (or explode if supercharged).
-func _handle_enemy_proj_hit(proj: Projectile3D, enemy: Node) -> void:
-	if proj.is_supercharged:
-		_supercharged_explosion(proj, Vector2i(enemy.grid_col, enemy.grid_row))
-		return
-	enemy.take_damage(proj.proj_damage)
-	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
-		"-%d" % int(proj.proj_damage), Color(1.0, 0.55, 0.30))
-	if enemy.hp <= 0:
-		_kill_enemy(enemy)
-	elif hud != null:
-		hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
-	_check_floor_clear()
-	if is_instance_valid(proj) and not proj._dead:
-		var e_center : Vector3 = hex_to_world(enemy.grid_col, enemy.grid_row)
-		var n : Vector3 = Vector3(proj.position.x - e_center.x, 0.0, proj.position.z - e_center.z)
-		if n.length_squared() < 0.0001: n = Vector3.FORWARD
-		proj.bounce_off_surface(n.normalized())
-
-# Player contact: freeze projectile, open ±0.4s SPACE window, resolve reaction.
-func _handle_player_proj_contact_async(proj: Projectile3D, player_idx: int) -> void:
-	if not is_instance_valid(proj): return
-	proj.set_process(false)   # freeze while reaction window is open
-	var prev_phase : Phase = phase   # remember so we restore correctly (PLAYER or ENEMY turn)
-	phase = Phase.DODGE_PHASE
-
-	var contact_t : float = Time.get_ticks_msec() / 1000.0
-	var result    : String = ""
-
-	# Pre-contact SPACE press check
-	var pre_rel : float = contact_t - _space_pressed_at   # > 0 means space before contact
-	if   pre_rel >= 0.0 and pre_rel <= 0.20: result = "perfect"
-	elif pre_rel >= 0.0 and pre_rel <= 0.40: result = "ok"
-
-	# Post-contact window: wait up to 0.4s for a fresh SPACE press
-	if result == "":
-		var old_press : float = _space_pressed_at
-		var waited    : float = 0.0
-		while waited < 0.40:
-			await get_tree().process_frame
-			waited += get_process_delta_time()
-			if _space_pressed_at != old_press:
-				var post_rel : float = _space_pressed_at - contact_t
-				if   post_rel >= 0.0 and post_rel <= 0.20: result = "perfect"; break
-				elif post_rel >= 0.0 and post_rel <= 0.40: result = "ok";      break
-				old_press = _space_pressed_at
-
-	if result == "": result = "miss"
-
-	if not is_instance_valid(proj):
-		phase = prev_phase
-		return
-
-	var player = players[player_idx]
-	var is_sonny : bool = not player.uses_draw_shot
-	var head_pos : Vector3 = player.position + Vector3(0, 1.9, 0)
-
-	match result:
-		"perfect":
-			if is_sonny:
-				# Normalize to player-like physics so enemy projectiles redirect correctly
-				# (enemy projs have neg_bounce=9999 and no decay, which would break redirect)
-				var _mike : Node = null
-				for _p in players:
-					if _p.uses_draw_shot: _mike = _p; break
-				proj.negative_bounce = _mike.proj_neg_bounce    if _mike else 5.0
-				proj.proj_speed      = minf(proj.proj_speed, _mike.proj_launch_speed if _mike else 18.0)
-				proj.uses_decay      = true
-				# Sonny: redirect toward mouse cursor
-				var mouse_dir : Vector3 = Vector3(
-					hover_world_pos.x - player.position.x, 0.0,
-					hover_world_pos.z - player.position.z)
-				if mouse_dir.length_squared() < 0.001:
-					mouse_dir = -proj.proj_direction
-				proj.redirect_to(mouse_dir)
-				proj.set_process(true)
-				_spawn_damage_popup(head_pos, "REDIRECT!", Color(0.31, 1.00, 0.51))
-				player.perfection = mini(player.perfection + 1, player.perfection_cap)
-				_refresh_hud()
-			else:
-				# Mike: catch/delete projectile
-				if proj.owner_node != player:
-					if player.caught_projectiles.size() < player.caught_capacity:
-						player.caught_projectiles.append({
-							"damage":     proj.proj_damage,
-							"speed":      proj.proj_speed,
-							"neg_bounce": player.proj_neg_bounce,
-							"uses_decay": proj.uses_decay,
-						})
-						_spawn_damage_popup(head_pos, "CAUGHT!", Color(0.31, 1.00, 0.51))
-					else:
-						_spawn_damage_popup(head_pos, "BAG FULL!", Color(1.0, 0.4, 0.2))
-				else:
-					_spawn_damage_popup(head_pos, "DODGE!", Color(0.95, 0.90, 0.30))
-				proj.die()
-				player.perfection = mini(player.perfection + 1, player.perfection_cap)
-				_refresh_hud()
-		"ok":
-			# Both characters: projectile passes through, no damage.
-			_spawn_damage_popup(head_pos, "DODGE!", Color(0.95, 0.90, 0.30))
-			player.perfection = mini(player.perfection + 1, player.perfection_cap)
-			# Unfreeze and clear hit hex so it passes through this player
-			var pid : int = proj.get_instance_id()
-			_proj_last_char_hex.erase(pid)
-			proj.set_process(true)
-			_refresh_hud()
-			phase = prev_phase
-			return
-		"miss":
-			# Normal collision: deal damage, bounce (or die if enemy proj).
-			if proj.is_supercharged:
-				_supercharged_explosion(proj, player_positions[player_idx])
-				phase = prev_phase
-				return
-			_apply_damage_to_player(player_idx, int(proj.proj_damage), "hit")
-			if is_instance_valid(proj) and not proj._dead:
-				var p_center : Vector3 = hex_to_world(player_positions[player_idx].x, player_positions[player_idx].y)
-				var n : Vector3 = Vector3(proj.position.x - p_center.x, 0.0, proj.position.z - p_center.z)
-				if n.length_squared() < 0.0001: n = Vector3.FORWARD
-				proj.bounce_off_surface(n.normalized())
-				if is_instance_valid(proj) and not proj._dead:
-					proj.set_process(true)
-
-	phase = prev_phase
-
-# Supercharged AoE explosion (3 redirects).
-func _supercharged_explosion(proj: Projectile3D, impact_hex: Vector2i) -> void:
-	var center_w : Vector3 = hex_to_world(impact_hex.x, impact_hex.y)
-	_spawn_damage_popup(center_w + Vector3(0, 2.0, 0), "SUPERCHARGE!", Color(1.0, 0.2, 0.05))
-	var aoe : Array = [impact_hex] + _get_neighbors(impact_hex.x, impact_hex.y)
-	for hex in aoe:
-		var extra_dmg : int = 1 if hex == impact_hex else 0
-		var total_dmg : int = int(proj.proj_damage) + extra_dmg
-		var e : Node = _get_enemy_at(hex)
-		if e != null:
-			e.take_damage(total_dmg)
-			_spawn_damage_popup(e.position + Vector3(0, 1.8, 0),
-				"-%d" % total_dmg, Color(1.0, 0.2, 0.05))
-			if e.hp <= 0: _kill_enemy(e)
-			elif hud != null: hud.update_enemy_hp(e.get_instance_id(), e.hp, e.max_hp)
-		var p_idx : int = _get_player_at(hex)
-		if p_idx >= 0:
-			_apply_damage_to_player(p_idx, total_dmg, "hit")
-	proj.die()
-	_check_floor_clear()
+func _process_projectiles(delta: float) -> void:
+	if _proj: _proj.process_projectiles(delta)
 
 # ═══════════════════════════════════════════════════════════
 #  SONNY BOMB — Mốc 7.3 (W key)
@@ -1771,11 +1248,16 @@ func _apply_grapple_pull(entity: Node, dest: Vector2i) -> void:
 	entity.grid_col = dest.x
 	entity.grid_row = dest.y
 	_move_entity_smooth(entity, dest.x, dest.y)
-	# Nếu là player, update player_positions
+	# Nếu là player, update player_positions + apply fire damage; else apply enemy fire dmg.
+	var is_player : bool = false
 	for i in range(players.size()):
 		if players[i] == entity:
 			player_positions[i] = dest
+			_check_fire_step_player(i)
+			is_player = true
 			break
+	if not is_player:
+		_check_fire_step_enemy(entity)
 
 # Visual: BoxMesh thin nối start↔end, hold 0.20s rồi fade alpha 0.30s.
 func _spawn_grapple_line(start: Vector3, end: Vector3) -> void:
@@ -1913,6 +1395,7 @@ func _push_enemy(enemy: Node, from_col: int, from_row: int, push_value: int) -> 
 	enemy.grid_col = dest.x
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
+	_check_fire_step_enemy(enemy)   # ô lửa: -1 HP khi bị đẩy lên
 
 func _kill_enemy(enemy: Node) -> void:
 	if enemy.enemy_type == "bomb":
@@ -1924,7 +1407,12 @@ func _do_kill_enemy(enemy: Node) -> void:
 	if hud != null:
 		hud.remove_enemy(enemy.get_instance_id())
 	enemies.erase(enemy)
-	_play_death_animation(enemy, true)   # true → queue_free khi xong
+	# Enemy có custom death anim (grunt) → đã trigger trong take_damage,
+	# KHÔNG despawn (giữ model trong scene). Else: scale+sink+free default.
+	if enemy.has_method("anim_trigger_death"):
+		pass
+	else:
+		_play_death_animation(enemy, true)
 
 # Khi hết enemies → floor clear. Mốc 9 sẽ wire vào world_map transition.
 func _check_floor_clear() -> void:
@@ -2159,6 +1647,8 @@ func _enemy_move_toward(enemy: Node, target_idx: int) -> void:
 	enemy.grid_col = dest.x
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
+	_face_enemy_to_nearest_player(enemy)
+	_check_fire_step_enemy(enemy)   # ô lửa: -1 HP
 	_update_valid_moves()
 	_refresh_tile_colors()
 
@@ -2170,6 +1660,8 @@ func _enemy_move_away(enemy: Node, target_idx: int) -> void:
 	enemy.grid_col = dest.x
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
+	_face_enemy_to_nearest_player(enemy)
+	_check_fire_step_enemy(enemy)   # ô lửa: -1 HP
 	_update_valid_moves()
 	_refresh_tile_colors()
 
@@ -2188,6 +1680,9 @@ func _enemy_perform_attack(enemy: Node, target_idx: int) -> void:
 	if attack.is_empty(): return
 	var attack_range : int = int(attack.get("range", 1))
 	await _telegraph_attack(target_idx)
+	# Trigger attack anim ngay khi telegraph xong, đồng thời với gameplay attack.
+	if enemy.has_method("anim_trigger_attack"):
+		enemy.anim_trigger_attack()
 	if attack_range > 1:
 		# Ranged: fire a real projectile; player reacts with SPACE in real-time.
 		var proj = _fire_enemy_projectile(enemy, target_idx, attack)
@@ -2255,6 +1750,33 @@ func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") 
 		if current_player_index < players.size():
 			var cur = players[current_player_index]
 			hud.set_hype_from_perfection(cur.perfection, cur.perfection_cap)
+
+# ═══════════════════════════════════════════════════════════
+#  FIRE-PIT TILE STEP DAMAGE
+#  ► Áp dụng cho bất kỳ entity (player + enemy) đáp lên ô fire_pit_tiles.
+#  ► Damage = FIRE_STEP_DAMAGE (1). Gọi sau khi grid_col/grid_row đã set.
+# ═══════════════════════════════════════════════════════════
+const FIRE_STEP_DAMAGE : int = 1
+
+func _is_fire_pit_at(col: int, row: int) -> bool:
+	return Vector2i(col, row) in fire_pit_tiles
+
+func _check_fire_step_player(player_idx: int) -> void:
+	if player_idx < 0 or player_idx >= players.size(): return
+	var pos : Vector2i = player_positions[player_idx]
+	if not _is_fire_pit_at(pos.x, pos.y): return
+	_apply_damage_to_player(player_idx, FIRE_STEP_DAMAGE, "hit")
+
+func _check_fire_step_enemy(enemy: Node) -> void:
+	if not is_instance_valid(enemy): return
+	if not _is_fire_pit_at(enemy.grid_col, enemy.grid_row): return
+	enemy.take_damage(FIRE_STEP_DAMAGE)
+	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
+		"-%d FIRE" % FIRE_STEP_DAMAGE, Color(1.0, 0.55, 0.20))
+	if enemy.hp <= 0:
+		_kill_enemy(enemy)
+	elif hud != null:
+		hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
 
 func _find_nearest_player_to(enemy: Node) -> int:
 	var best_idx : int = -1
@@ -2392,36 +1914,18 @@ func _get_player_at(pos: Vector2i) -> int:
 # ═══════════════════════════════════════════════════════════
 
 func _update_camera() -> void:
-	var pitch : float = deg_to_rad(camera_pitch_deg)
-	var yaw   : float = deg_to_rad(camera_yaw_deg)
-	# Window to → effective_dist nhỏ → camera lại gần → objects to lên
-	var effective_dist : float = camera_distance / window_zoom_factor
-	var offset : Vector3 = Vector3(
-		effective_dist * cos(pitch) * cos(yaw),
-		effective_dist * sin(pitch),
-		effective_dist * cos(pitch) * sin(yaw)
-	)
-	camera.global_position = camera_anchor + offset
-	camera.look_at(camera_anchor, Vector3.UP)
+	if _cam: _cam.update_transform()
 
 func set_camera_anchor(world_pos: Vector3) -> void:
-	camera_anchor = Vector3(world_pos.x, 0.0, world_pos.z)
-	_update_camera()
+	if _cam: _cam.set_anchor(world_pos)
 
 # ═══════════════════════════════════════════════════════════
 #  MOUSE → WORLD / HEX
 # ═══════════════════════════════════════════════════════════
 
 func mouse_to_ground(mouse_pos: Vector2) -> Vector3:
-	var origin : Vector3 = camera.project_ray_origin(mouse_pos)
-	var normal : Vector3 = camera.project_ray_normal(mouse_pos)
-	if absf(normal.y) < 0.0001:
-		return Vector3(NAN, NAN, NAN)
-	# Pick lên mặt trên của tile (Y = GROUND_Y) cho cảm giác trực quan
-	var t : float = (GROUND_Y - origin.y) / normal.y
-	if t < 0.0:
-		return Vector3(NAN, NAN, NAN)
-	return origin + normal * t
+	if _cam == null: return Vector3(NAN, NAN, NAN)
+	return _cam.mouse_to_ground(mouse_pos, GROUND_Y)
 
 func mouse_to_hex(mouse_pos: Vector2) -> Vector2i:
 	# Pass 1: Capsule-aware picking — nếu ray đi qua capsule của entity nào,
@@ -2483,29 +1987,15 @@ func _pick_entity_hex(origin: Vector3, dir: Vector3) -> Vector2i:
 #  INPUT
 # ═══════════════════════════════════════════════════════════
 
-# ─── Camera pan (arrow keys) ────────────────────────────────
-# Hold UP/DOWN/LEFT/RIGHT để di chuyển camera_anchor quanh bản đồ.
-# Pan relative to camera yaw — UP = đi theo hướng camera đang nhìn,
-# LEFT/RIGHT = strafe ngang.
-const CAM_PAN_SPEED : float = 10.0   # units per second
-const CAM_PAN_BOUND : float = 25.0   # giới hạn anchor để không bay xa map
-
+# Camera pan (arrow keys) — delegate to CameraRig.pan()
 func _process(delta: float) -> void:
 	_process_projectiles(delta)
-	var pan := Vector3.ZERO
-	if Input.is_key_pressed(KEY_UP):    pan.z -= 1.0
-	if Input.is_key_pressed(KEY_DOWN):  pan.z += 1.0
+	var pan := Vector2.ZERO
+	if Input.is_key_pressed(KEY_UP):    pan.y -= 1.0
+	if Input.is_key_pressed(KEY_DOWN):  pan.y += 1.0
 	if Input.is_key_pressed(KEY_LEFT):  pan.x -= 1.0
 	if Input.is_key_pressed(KEY_RIGHT): pan.x += 1.0
-	if pan == Vector3.ZERO: return
-	var yaw : float = deg_to_rad(camera_yaw_deg)
-	var forward : Vector3 = -Vector3(cos(yaw), 0, sin(yaw))   # XZ forward
-	var right   : Vector3 =  Vector3(sin(yaw), 0, -cos(yaw))  # XZ right
-	var dir : Vector3 = (forward * -pan.z + right * pan.x).normalized()
-	camera_anchor += dir * CAM_PAN_SPEED * delta
-	camera_anchor.x = clampf(camera_anchor.x, -CAM_PAN_BOUND, CAM_PAN_BOUND)
-	camera_anchor.z = clampf(camera_anchor.z, -CAM_PAN_BOUND, CAM_PAN_BOUND)
-	_update_camera()
+	if _cam: _cam.pan(pan, delta)
 
 func _input(event: InputEvent) -> void:
 	# ESC = cancel bomb/grapple/aim mode trước, sau đó mới quit game
@@ -2533,21 +2023,13 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
 			KEY_BRACKETLEFT:
-				camera_pitch_deg = clampf(
-					camera_pitch_deg - CAM_PITCH_STEP, CAM_PITCH_MIN, CAM_PITCH_MAX)
-				_update_camera(); _refresh_debug()
+				_cam.adjust_pitch(-CameraRig.PITCH_STEP); _refresh_debug()
 			KEY_BRACKETRIGHT:
-				camera_pitch_deg = clampf(
-					camera_pitch_deg + CAM_PITCH_STEP, CAM_PITCH_MIN, CAM_PITCH_MAX)
-				_update_camera(); _refresh_debug()
+				_cam.adjust_pitch( CameraRig.PITCH_STEP); _refresh_debug()
 			KEY_MINUS:
-				camera_distance = clampf(
-					camera_distance + CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX)
-				_update_camera(); _refresh_debug()
+				_cam.adjust_distance( CameraRig.DIST_STEP); _refresh_debug()
 			KEY_EQUAL:
-				camera_distance = clampf(
-					camera_distance - CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX)
-				_update_camera(); _refresh_debug()
+				_cam.adjust_distance(-CameraRig.DIST_STEP); _refresh_debug()
 			KEY_TAB:
 				if phase == Phase.PLAYER_TURN and mike_timing_bar == null \
 						and (players.is_empty() or not players[current_player_index].aiming):
@@ -2593,13 +2075,9 @@ func _input(event: InputEvent) -> void:
 	# ── Cuộn chuột → zoom (lên = zoom in, xuống = zoom out) ──
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			camera_distance = clampf(
-				camera_distance - CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX)
-			_update_camera(); _refresh_debug()
+			_cam.adjust_distance(-CameraRig.DIST_STEP); _refresh_debug()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			camera_distance = clampf(
-				camera_distance + CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX)
-			_update_camera(); _refresh_debug()
+			_cam.adjust_distance( CameraRig.DIST_STEP); _refresh_debug()
 
 	# ── RMB: cancel aim mode (design §5); otherwise orbit camera ───────
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
@@ -2617,16 +2095,11 @@ func _input(event: InputEvent) -> void:
 			_refresh_tile_colors()
 			_refresh_debug()
 		else:
-			rmb_dragging = event.pressed
+			_cam.rmb_dragging = event.pressed
 
 	if event is InputEventMouseMotion:
-		if rmb_dragging:
-			camera_yaw_deg = wrapf(
-				camera_yaw_deg + event.relative.x * CAM_YAW_DRAG, -360.0, 360.0)
-			camera_pitch_deg = clampf(
-				camera_pitch_deg + event.relative.y * CAM_PITCH_DRAG,
-				CAM_PITCH_MIN, CAM_PITCH_MAX)
-			_update_camera()
+		if _cam.rmb_dragging:
+			_cam.handle_rmb_drag(event.relative)
 			_refresh_debug()
 			return   # bỏ qua hover update khi đang xoay
 		# Mike đang aim → drag chuột cập nhật drag_center của timing bar.
@@ -2662,7 +2135,7 @@ func _refresh_debug() -> void:
 		return
 	if players.is_empty():
 		debug_label.text = "pitch %.0f° yaw %.0f° dist %.0f  hover=%s" \
-			% [camera_pitch_deg, camera_yaw_deg, camera_distance, str(hover_hex)]
+			% [_cam.pitch_deg, _cam.yaw_deg, _cam.distance, str(hover_hex)]
 		return
 	var cur = players[current_player_index]
 	if cur.placing_bomb:
@@ -2695,5 +2168,5 @@ func _refresh_debug() -> void:
 			cur.hp, cur.max_hp,
 			cur.actions_left, cur.actions_per_turn,
 			hints,
-			camera_pitch_deg, camera_distance
+			_cam.pitch_deg, _cam.distance
 		]
