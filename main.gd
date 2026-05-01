@@ -59,6 +59,26 @@ const PROJ_ENEMY_SPEED_SLOW   : float = 5.0
 const PROJ_ENEMY_SPEED_NORMAL : float = 8.0
 const PROJ_ENEMY_SPEED_FAST   : float = 14.0
 const PROJECTILE_Y            : float = 1.10   # độ cao bay (giữa thân character)
+# Cube-coordinate unit directions (flat-top hex, all 6 neighbours)
+# Index: 0=E  1=W  2=NE  3=SW  4=SE  5=NW  (clockwise circle: 0,4,3,1,5,2)
+const CUBE_DIR_VECS : Array = [
+	Vector3i( 1,-1, 0), Vector3i(-1, 1, 0),
+	Vector3i( 0,-1, 1), Vector3i( 0, 1,-1),
+	Vector3i( 1, 0,-1), Vector3i(-1, 0, 1),
+]
+# Maps CUBE_DIR_VECS index → flat-top hex edge index (edge i spans vertex i and (i+1)%6).
+# Derived from world-XZ angle of each cube direction vs edge outward normals at 30°,90°…330°.
+const GUARD_DIR_TO_EDGE : Array = [0, 3, 1, 4, 5, 2]
+# Guardian Gorilla shield arc: for each facing direction i, the 3 direction indices that
+# form the 180° front arc (facing ± 60°). Used for shield redirect/immunity/reduction.
+const GUARD_ARC : Array = [
+	[0, 2, 4],  # face 0 (E):  E + NE + SE
+	[1, 3, 5],  # face 1 (W):  W + SW + NW
+	[2, 5, 0],  # face 2 (NE): NE + NW + E
+	[3, 4, 1],  # face 3 (SW): SW + SE + W
+	[4, 0, 3],  # face 4 (SE): SE + E + SW
+	[5, 1, 2],  # face 5 (NW): NW + W + NE
+]
 
 # Mốc 9.1: Floor scenarios — composition mỗi floor (column layout + enemies).
 # `current_floor` index vào array; floor cuối là boss.
@@ -1081,6 +1101,10 @@ func _spawn_enemy(type_key: String, col: int, row: int) -> Node:
 	add_child(enemy)
 	enemy.setup(col, row)
 	enemy.position = entity_position(col, row)
+	if type_key == "guardian_gorilla":
+		_guard_build_shield_local(enemy)
+		_guard_build_face(enemy)
+		_guard_update_facing(enemy)
 	enemies.append(enemy)
 	return enemy
 
@@ -1719,6 +1743,22 @@ func _check_proj_characters(proj: Projectile3D,
 
 # Enemy hit: damage + bounce off hex border (or explode if supercharged).
 func _handle_enemy_proj_hit(proj: Projectile3D, enemy: Node) -> void:
+	# Guardian Gorilla: front-arc hit → smart wall. Guard takes 0 damage; ball re-aims
+	# toward nearest player and loses negative_bounce speed (same penalty as a wall hit).
+	if enemy.enemy_type == "guardian_gorilla" and _guard_proj_from_front(enemy, proj):
+		var tgt_idx := _find_nearest_player_to(enemy)
+		if tgt_idx >= 0:
+			var p_w : Vector3 = players[tgt_idx].position
+			var new_dir := Vector3(p_w.x - proj.position.x, 0.0, p_w.z - proj.position.z)
+			if new_dir.length_squared() > 0.0001:
+				proj.proj_direction = new_dir.normalized()
+			proj.proj_speed -= proj.negative_bounce
+			if proj.proj_speed < Projectile3D.MIN_SPEED:
+				proj.die()
+				return
+			proj.owner_node = null
+			_spawn_damage_popup(enemy.position + Vector3(0, 2.0, 0), "DEFLECTED!", Color(0.30, 0.60, 1.0))
+		return
 	if proj.is_supercharged:
 		_supercharged_explosion(proj, Vector2i(enemy.grid_col, enemy.grid_row))
 		return
@@ -2085,6 +2125,9 @@ func _player_attack_enemy(enemy: Node) -> void:
 	if current_player.has_method("play_attack"):
 		current_player.play_attack()
 	var dmg : int = current_player.get_q_dmg()
+	if enemy.enemy_type == "guardian_gorilla" and \
+			_guard_is_shielded_from(enemy, current_player.grid_col, current_player.grid_row):
+		dmg = maxi(0, dmg - 1)
 	enemy.take_damage(dmg)
 	current_player.use_action()
 	current_player.has_attacked = true
@@ -2107,6 +2150,8 @@ func _player_attack_enemy(enemy: Node) -> void:
 # Collision: wall/column → pushed target takes push_value dmg; enemy collision → both take 1 dmg.
 func _push_enemy(enemy: Node, from_col: int, from_row: int, push_value: int) -> void:
 	if push_value <= 0 or not is_instance_valid(enemy): return
+	if enemy.enemy_type == "guardian_gorilla" and _guard_is_shielded_from(enemy, from_col, from_row):
+		return   # push cancelled by front arc shield
 	var to_cube := func(c: int, r: int) -> Vector3i:
 		var x := c; var z := r - (c - (c & 1)) / 2
 		return Vector3i(x, -x - z, z)
@@ -2418,9 +2463,14 @@ func _run_enemy_turn() -> void:
 	_refresh_tile_colors()
 	_refresh_debug()
 	_refresh_hud()
+	_maybe_skip_stunned_current_player()
 
 func _run_enemy_actions(enemy: Node) -> void:
 	enemy.tick_turn()
+	if enemy.stun_turns > 0:
+		enemy.stun_turns -= 1
+		_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0), "STUNNED", Color(0.65, 0.65, 0.65))
+		return
 	var poison_dmg : int = enemy.tick_poison()
 	if poison_dmg > 0:
 		enemy.take_damage(poison_dmg)
@@ -2448,6 +2498,15 @@ func _run_enemy_actions(enemy: Node) -> void:
 			"attack":
 				await _enemy_perform_attack(enemy, target_idx)
 				await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+			"boxing_bear_combo":
+				await _boxing_bear_combo_async(enemy, target_idx)
+				return
+			"dasher_turn":
+				await _dasher_turn_async(enemy)
+				return
+			"guardian_gorilla_turn":
+				await _guardian_gorilla_turn_async(enemy)
+				return
 			"charge":
 				await _bulldozer_charge_async(enemy)
 				return  # charge consumed both actions
@@ -2553,6 +2612,465 @@ func _trigger_dodge_bar(enemy: Node, target_idx: int, attack: Dictionary) -> voi
 		var result : String = await bar.bar_finished
 		_apply_damage_to_player(target_idx, dmg, result)
 	phase = Phase.ENEMY_TURN
+
+# Boxing Bear Combo: up to 5 sequential dodge bars at 1.5× speed.
+# Chain breaks on first hit; dodging all 5 stuns Boxing Bear for 1 turn.
+func _boxing_bear_combo_async(enemy: Node, target_idx: int) -> void:
+	phase = Phase.DODGE_PHASE
+	await _telegraph_attack(target_idx)
+	var dodge_line : float = enemy.dodge_line
+	var all_dodged : bool  = true
+	for _i in range(5):
+		if not is_instance_valid(enemy) or enemy.hp <= 0: break
+		if _all_players_dead(): break
+		var bar = DodgeBarScene.instantiate()
+		bar.setup(dodge_line, 1.5)
+		camera.add_child(bar)
+		bar.position = Vector3(0.0, -0.18, -1.2)
+		var result : String = await bar.bar_finished
+		if result == "hit":
+			_apply_damage_to_player(target_idx, 1, result)
+			all_dodged = false
+			break
+		# perfect or ok: no damage, chain continues
+	if all_dodged and is_instance_valid(enemy) and enemy.hp > 0:
+		enemy.stun_turns = 1
+		_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0), "STUNNED!", Color(0.65, 0.65, 0.65))
+	phase = Phase.ENEMY_TURN
+
+# ─── Dasher ─────────────────────────────────────────────────
+
+# Returns true if pos is impassable or occupied by any entity other than exclude_enemy.
+func _is_dash_path_blocked(pos: Vector2i, exclude_enemy: Node) -> bool:
+	if pos.x < 0 or pos.x >= GRID_COLS or pos.y < 0 or pos.y >= GRID_ROWS: return true
+	var tile = tiles.get(pos)
+	if tile == null or not tile.passable: return true
+	for e in enemies:
+		if e == exclude_enemy or e.hp <= 0: continue
+		if Vector2i(e.grid_col, e.grid_row) == pos: return true
+	for i in range(players.size()):
+		if players[i].hp > 0 and player_positions[i] == pos: return true
+	return false
+
+# ═══════════════════════════════════════════════════════════
+#  GUARDIAN GORILLA
+# ═══════════════════════════════════════════════════════════
+
+# Snap guard's facing toward nearest player; rotates the node so local-space shield quads follow.
+func _guard_update_facing(enemy: Node) -> void:
+	var target_idx := _find_nearest_player_to(enemy)
+	if target_idx < 0: return
+	# Keep current facing when both players are alive and equidistant.
+	if players.size() >= 2 and players[0].hp > 0 and players[1].hp > 0:
+		var d0 := _hex_dist(enemy.grid_col, enemy.grid_row, players[0].grid_col, players[0].grid_row)
+		var d1 := _hex_dist(enemy.grid_col, enemy.grid_row, players[1].grid_col, players[1].grid_row)
+		if d0 == d1: return
+	var p   = players[target_idx]
+	var eg  := _to_cube_i(enemy.grid_col, enemy.grid_row)
+	var pg  := _to_cube_i(p.grid_col, p.grid_row)
+	var diff : Vector3i = pg - eg
+	if diff == Vector3i.ZERO: return
+	var best_dot : float = -999.0
+	var best_idx : int   = enemy.guard_facing
+	for i in range(CUBE_DIR_VECS.size()):
+		var d : Vector3i = CUBE_DIR_VECS[i]
+		var dot : float  = float(diff.x * d.x + diff.y * d.y + diff.z * d.z)
+		if dot > best_dot:
+			best_dot = dot
+			best_idx = i
+	enemy.guard_facing = best_idx
+	# Rotate the enemy node to face the player; child shield quads rotate with it automatically.
+	var e_pos : Vector3 = enemy.position
+	var p_pos : Vector3 = p.position
+	if not (absf(p_pos.x - e_pos.x) < 0.001 and absf(p_pos.z - e_pos.z) < 0.001):
+		enemy.look_at(Vector3(p_pos.x, e_pos.y, p_pos.z), Vector3.UP)
+		enemy.rotate_object_local(Vector3.UP, PI)
+
+# Builds one double-sided alpha quad from local edge a→b rising by height. Added as child of enemy.
+func _build_shield_quad(a: Vector3, b: Vector3, height: float) -> MeshInstance3D:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var ta := Vector3(a.x, a.y + height, a.z)
+	var tb := Vector3(b.x, b.y + height, b.z)
+	st.add_vertex(a);  st.add_vertex(b);  st.add_vertex(tb)   # front face
+	st.add_vertex(a);  st.add_vertex(tb); st.add_vertex(ta)
+	st.add_vertex(b);  st.add_vertex(a);  st.add_vertex(ta)   # back face
+	st.add_vertex(b);  st.add_vertex(ta); st.add_vertex(tb)
+	var mi  := MeshInstance3D.new()
+	mi.mesh  = st.commit()
+	var mat := StandardMaterial3D.new()
+	mat.transparency     = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode     = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color     = Color(0.35, 0.65, 1.0, 0.55)
+	mat.no_depth_test    = true
+	mat.cull_mode        = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = mat
+	return mi
+
+# Two bright-yellow eye spheres on the local +Z face at capsule eye level (y≈1.25).
+# Children of the enemy node — rotate for free with the body; never rebuilt.
+func _guard_build_face(enemy: Node) -> void:
+	var eye_mat := StandardMaterial3D.new()
+	eye_mat.albedo_color               = Color(1.0, 0.85, 0.10)
+	eye_mat.emission_enabled           = true
+	eye_mat.emission                   = Color(1.0, 0.85, 0.10)
+	eye_mat.emission_energy_multiplier = 0.6
+	eye_mat.shading_mode               = BaseMaterial3D.SHADING_MODE_UNSHADED
+	for x_off : float in [-0.12, 0.12]:
+		var sph := SphereMesh.new()
+		sph.radius          = 0.065
+		sph.height          = 0.13
+		sph.radial_segments = 8
+		sph.rings           = 4
+		var mi := MeshInstance3D.new()
+		mi.mesh              = sph
+		mi.position          = Vector3(x_off, 1.25, 0.30)
+		mi.material_override = eye_mat
+		enemy.add_child(mi)
+
+# Spawns 3 shield wall quads as permanent local-space children of the Guard node.
+# Local +Z = Guard's forward (toward player after look_at). Front 3 edges face +Z (edges 0,1,2).
+# Called once at spawn; quads rotate with the node for free — never rebuilt or freed manually.
+func _guard_build_shield_local(enemy: Node) -> void:
+	var verts : Array = []
+	for i in range(6):
+		var angle : float = i * PI / 3.0
+		verts.append(Vector3(HEX_SIZE * cos(angle), 0.0, HEX_SIZE * sin(angle)))
+	for ei in [0, 1, 2]:   # edges whose outward normals have positive local-Z (front arc)
+		enemy.add_child(_build_shield_quad(verts[ei], verts[(ei + 1) % 6], 1.2))
+
+# Returns the 3 in-grid hex positions of the guard's front arc.
+func _guard_arc_hexes(enemy: Node) -> Array:
+	var guard_cube : Vector3i = _to_cube_i(enemy.grid_col, enemy.grid_row)
+	var arc        : Array    = []
+	for dir_idx in GUARD_ARC[enemy.guard_facing]:
+		var nb  := _from_cube_i(guard_cube + CUBE_DIR_VECS[dir_idx])
+		if nb.x >= 0 and nb.x < GRID_COLS and nb.y >= 0 and nb.y < GRID_ROWS:
+			arc.append(nb)
+	return arc
+
+# True if the source hex is in the guard's front arc direction (directional check via cube dot).
+func _guard_is_shielded_from(enemy: Node, src_col: int, src_row: int) -> bool:
+	var eg   := _to_cube_i(enemy.grid_col, enemy.grid_row)
+	var sg   := _to_cube_i(src_col, src_row)
+	var diff : Vector3i = sg - eg
+	if diff == Vector3i.ZERO: return false
+	var best_dot : float = -999.0
+	var best_idx : int   = 0
+	for i in range(CUBE_DIR_VECS.size()):
+		var d : Vector3i = CUBE_DIR_VECS[i]
+		var dot : float  = float(diff.x * d.x + diff.y * d.y + diff.z * d.z)
+		if dot > best_dot:
+			best_dot = dot
+			best_idx = i
+	return best_idx in GUARD_ARC[enemy.guard_facing]
+
+# True if a projectile's incoming direction is from the guard's front arc.
+func _guard_proj_from_front(enemy: Node, proj) -> bool:
+	var g_w        := hex_to_world(enemy.grid_col, enemy.grid_row)
+	var guard_cube := _to_cube_i(enemy.grid_col, enemy.grid_row)
+	# incoming = direction the proj came FROM (opposite of travel direction)
+	var incoming   := Vector2(-proj.proj_direction.x, -proj.proj_direction.z)
+	if incoming.length_squared() < 0.0001: return false
+	incoming = incoming.normalized()
+	var best_dot : float = -999.0
+	var best_idx : int   = 0
+	for i in range(CUBE_DIR_VECS.size()):
+		var nb_off := _from_cube_i(guard_cube + CUBE_DIR_VECS[i])
+		var nb_w   := hex_to_world(nb_off.x, nb_off.y)
+		var dw     := Vector2(nb_w.x - g_w.x, nb_w.z - g_w.z)
+		if dw.length_squared() < 0.0001: continue
+		var dot := incoming.dot(dw.normalized())
+		if dot > best_dot:
+			best_dot = dot
+			best_idx = i
+	return best_idx in GUARD_ARC[enemy.guard_facing]
+
+# A1 — Shield Slam: shared SPACE for all players in front arc. 0 dmg; stun on miss.
+func _guard_slam_async(enemy: Node) -> void:
+	var arc_hexes := _guard_arc_hexes(enemy)
+	var caught    : Array = []
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		if player_positions[i] in arc_hexes:
+			caught.append(i)
+	if caught.is_empty(): return
+	await _telegraph_attack(caught[0])
+	phase = Phase.DODGE_PHASE
+	var bar = DodgeBarScene.instantiate()
+	bar.setup(enemy.dodge_line, 1.0)
+	camera.add_child(bar)
+	bar.position = Vector3(0.0, -0.18, -1.2)
+	var result : String = await bar.bar_finished
+	phase = Phase.ENEMY_TURN
+	for idx in caught:
+		var head_pos : Vector3 = players[idx].position + Vector3(0, 1.9, 0)
+		match result:
+			"perfect":
+				_spawn_damage_popup(head_pos, "PERFECT!", Color(0.31, 1.00, 0.51))
+			"ok":
+				_spawn_damage_popup(head_pos, "DODGED!", Color(0.87, 0.87, 0.30))
+			"hit":
+				if players[idx].hp > 0:
+					players[idx].stun_turns = 1
+					_spawn_damage_popup(head_pos, "STUNNED!", Color(0.65, 0.65, 0.65))
+
+# A2 — Triple Strike: 3 sequential bars escalating speed, 1 dmg each, all always fire.
+func _guard_triple_strike_async(enemy: Node, target_idx: int) -> void:
+	await _telegraph_attack(target_idx)
+	phase = Phase.DODGE_PHASE
+	for mult in [0.70, 1.00, 1.50]:
+		if _all_players_dead(): break
+		var cur_target := _find_nearest_player_to(enemy)
+		if cur_target < 0: break
+		var bar = DodgeBarScene.instantiate()
+		bar.setup(enemy.dodge_line, mult)
+		camera.add_child(bar)
+		bar.position = Vector3(0.0, -0.18, -1.2)
+		var result : String = await bar.bar_finished
+		_apply_damage_to_player(cur_target, 1, result)
+	phase = Phase.ENEMY_TURN
+
+# Selects and runs one attack action: A1 (slam) if both players adjacent, else alternates A1/A2.
+func _guard_attack_once(enemy: Node) -> void:
+	var target_idx := _find_nearest_player_to(enemy)
+	if target_idx < 0: return
+	var alive_adjacent : int = 0
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		if _hex_dist(enemy.grid_col, enemy.grid_row, players[i].grid_col, players[i].grid_row) == 1:
+			alive_adjacent += 1
+	if alive_adjacent >= 2:
+		await _guard_slam_async(enemy)
+	elif enemy.guard_attack_index % 2 == 0:
+		await _guard_slam_async(enemy)
+		enemy.guard_attack_index += 1
+	else:
+		await _guard_triple_strike_async(enemy, target_idx)
+		enemy.guard_attack_index += 1
+
+# Full two-action Guardian Gorilla turn.
+func _guardian_gorilla_turn_async(enemy: Node) -> void:
+	_guard_update_facing(enemy)
+	var target_idx : int = _find_nearest_player_to(enemy)
+	if target_idx < 0: return
+
+	# If any living player is adjacent, stay put and spend both actions attacking.
+	var any_adjacent := false
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		if _hex_dist(enemy.grid_col, enemy.grid_row, players[i].grid_col, players[i].grid_row) == 1:
+			any_adjacent = true
+			break
+
+	if any_adjacent:
+		await _guard_attack_once(enemy)
+		await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+		if not is_instance_valid(enemy) or enemy.hp <= 0 or _all_players_dead(): return
+		_guard_update_facing(enemy)
+		await _guard_attack_once(enemy)
+		await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+	else:
+		# Move toward nearest player, update facing, then attack if now adjacent.
+		_enemy_move_toward(enemy, target_idx)
+		await get_tree().create_timer(ACTION_DELAY).timeout
+		if not is_instance_valid(enemy) or enemy.hp <= 0 or _all_players_dead(): return
+		_guard_update_facing(enemy)
+		target_idx = _find_nearest_player_to(enemy)
+		if target_idx < 0: return
+		var d_new : int = _hex_dist(enemy.grid_col, enemy.grid_row,
+			players[target_idx].grid_col, players[target_idx].grid_row)
+		if d_new == 1:
+			await _guard_attack_once(enemy)
+			await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+
+# ═══════════════════════════════════════════════════════════
+#  DASHER
+# ═══════════════════════════════════════════════════════════
+
+# Best straight-line landing hex for a dash. mode: "band" = prefer d=5–6, "approach" = minimize d, "flee" = maximize min-d from all players.
+func _dasher_best_dash_dest(enemy: Node, max_range: int, mode: String,
+		target_col: int, target_row: int) -> Vector2i:
+	var enemy_cube : Vector3i = _to_cube_i(enemy.grid_col, enemy.grid_row)
+	var best       := Vector2i(-1, -1)
+	var best_score : float = 1e9
+	var best_steps : int   = -1
+	for dir in CUBE_DIR_VECS:
+		var cur    : Vector3i = Vector3i(enemy_cube.x, enemy_cube.y, enemy_cube.z)
+		var last   := Vector2i(-1, -1)
+		var steps  : int = 0
+		for _s in range(max_range):
+			cur += dir
+			var off := _from_cube_i(cur)
+			if _is_dash_path_blocked(off, enemy): break
+			last  = off
+			steps += 1
+		if last.x < 0: continue
+		var score : float
+		match mode:
+			"band":
+				var d : int = _hex_dist(last.x, last.y, target_col, target_row)
+				score = minf(absf(d - 5.0), absf(d - 6.0))
+			"approach":
+				score = float(_hex_dist(last.x, last.y, target_col, target_row))
+			_:  # "flee" — maximize min dist to any player (negate so lower = better)
+				var min_d : int = 999
+				for i in range(players.size()):
+					if players[i].hp <= 0: continue
+					var d : int = _hex_dist(last.x, last.y, players[i].grid_col, players[i].grid_row)
+					if d < min_d: min_d = d
+				score = -float(min_d)
+		if score < best_score or (score == best_score and steps > best_steps):
+			best_score = score
+			best       = last
+			best_steps = steps
+	return best
+
+# Execute a dash: update grid position, run smooth animation, check fire pit.
+func _dasher_do_dash(enemy: Node, dest: Vector2i) -> void:
+	if dest.x < 0: return
+	enemy.grid_col = dest.x
+	enemy.grid_row = dest.y
+	_move_entity_smooth(enemy, dest.x, dest.y)
+	_check_fire_step_enemy(enemy)
+	_update_valid_moves()
+	_refresh_tile_colors()
+
+# Fire A1 (triple shot) or A2 (barrage) based on dash_attack_index, then toggle.
+func _dasher_ranged_volley_async(enemy: Node, target_idx: int) -> void:
+	var atk_idx : int        = enemy.dash_attack_index
+	var attack  : Dictionary = enemy.attacks[atk_idx]
+	var hits     : int   = int(attack.get("hits", 1))
+	var interval : float = float(attack.get("hit_interval", 0.2))
+	await _telegraph_attack(target_idx)
+	for _i in range(hits):
+		if not is_instance_valid(enemy) or enemy.hp <= 0: return
+		if _all_players_dead(): return
+		var cur_target : int = _find_nearest_player_to(enemy)
+		if cur_target < 0: return
+		var proj : Projectile3D = _fire_enemy_projectile(enemy, cur_target, attack)
+		await proj.projectile_died
+		if interval > 0.0:
+			await get_tree().create_timer(interval).timeout
+	if is_instance_valid(enemy):
+		enemy.dash_attack_index = 1 - enemy.dash_attack_index
+
+# A3 — hits all adjacent players with one shared dodge bar. Miss → stun.
+func _dasher_adjacency_slam_async(enemy: Node) -> void:
+	var caught : Array = []
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		if _hex_dist(enemy.grid_col, enemy.grid_row, players[i].grid_col, players[i].grid_row) == 1:
+			caught.append(i)
+	if caught.is_empty(): return
+	await _telegraph_attack(caught[0])
+	phase = Phase.DODGE_PHASE
+	var bar = DodgeBarScene.instantiate()
+	bar.setup(enemy.dodge_line, 1.0)
+	camera.add_child(bar)
+	bar.position = Vector3(0.0, -0.18, -1.2)
+	var result : String = await bar.bar_finished
+	phase = Phase.ENEMY_TURN
+	for idx in caught:
+		# Perfect: 0 dmg no stun; OK: 1 dmg no stun; Miss: 1 dmg + stun
+		var apply_result : String = "hit" if result != "perfect" else "perfect"
+		_apply_damage_to_player(idx, 1, apply_result)
+		if result == "hit" and players[idx].hp > 0:
+			players[idx].stun_turns = 1
+			_spawn_damage_popup(players[idx].position + Vector3(0, 1.9, 0),
+				"STUNNED!", Color(0.65, 0.65, 0.65))
+
+# A4 — 3 sequential dodge bars at escalating speed; all 3 always fire.
+func _dasher_combo_async(enemy: Node, target_idx: int) -> void:
+	await _telegraph_attack(target_idx)
+	phase = Phase.DODGE_PHASE
+	for mult in [0.70, 1.00, 1.50]:
+		if _all_players_dead(): break
+		var cur_target : int = _find_nearest_player_to(enemy)
+		if cur_target < 0: break
+		var bar = DodgeBarScene.instantiate()
+		bar.setup(enemy.dodge_line, mult)
+		camera.add_child(bar)
+		bar.position = Vector3(0.0, -0.18, -1.2)
+		var result : String = await bar.bar_finished
+		_apply_damage_to_player(cur_target, 1, result)
+	phase = Phase.ENEMY_TURN
+
+# Returns the min-step dash landing that puts Dasher adjacent to target, or (-1,-1) if unreachable.
+func _dasher_find_min_adjacent_dash(enemy: Node, target_col: int, target_row: int, max_range: int) -> Vector2i:
+	var enemy_cube : Vector3i = _to_cube_i(enemy.grid_col, enemy.grid_row)
+	var best       := Vector2i(-1, -1)
+	var best_steps : int = 999
+	for dir in CUBE_DIR_VECS:
+		var cur := Vector3i(enemy_cube.x, enemy_cube.y, enemy_cube.z)
+		for step in range(1, max_range + 1):
+			cur += dir
+			var off := _from_cube_i(cur)
+			if _is_dash_path_blocked(off, enemy): break
+			if _hex_dist(off.x, off.y, target_col, target_row) == 1:
+				if step < best_steps:
+					best_steps = step
+					best = off
+				break
+	return best
+
+# Full two-action Dasher turn. Evaluated once at turn start based on distance to nearest player.
+func _dasher_turn_async(enemy: Node) -> void:
+	var target_idx : int = _find_nearest_player_to(enemy)
+	if target_idx < 0: return
+	var p = players[target_idx]
+	var d : int = _hex_dist(enemy.grid_col, enemy.grid_row, p.grid_col, p.grid_row)
+
+	if d > 6:
+		# Action 1: dash toward (band mode, max 4 hexes)
+		var dest := _dasher_best_dash_dest(enemy, 4, "band", p.grid_col, p.grid_row)
+		_dasher_do_dash(enemy, dest)
+		await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+		# Action 2: ranged volley
+		if not is_instance_valid(enemy) or enemy.hp <= 0 or _all_players_dead(): return
+		target_idx = _find_nearest_player_to(enemy)
+		if target_idx >= 0:
+			await _dasher_ranged_volley_async(enemy, target_idx)
+	elif d >= 4:  # 4–6: optimal range
+		# Action 1: ranged volley
+		await _dasher_ranged_volley_async(enemy, target_idx)
+		await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+		# Action 2: reposition to maintain 4–6 band, max 3 hexes
+		if not is_instance_valid(enemy) or enemy.hp <= 0 or _all_players_dead(): return
+		target_idx = _find_nearest_player_to(enemy)
+		if target_idx < 0: return
+		var dest := _dasher_best_dash_dest(enemy, 3, "band",
+			players[target_idx].grid_col, players[target_idx].grid_row)
+		_dasher_do_dash(enemy, dest)
+		await get_tree().create_timer(TWEEN_SPEED + 0.1).timeout
+	elif d >= 2:  # 2–3: mid-range, check if adjacent dash is possible
+		var adj_dest := _dasher_find_min_adjacent_dash(enemy, p.grid_col, p.grid_row, 4)
+		if adj_dest.x >= 0:
+			# Can reach adjacency: dash in + combo
+			_dasher_do_dash(enemy, adj_dest)
+			await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+			if not is_instance_valid(enemy) or enemy.hp <= 0 or _all_players_dead(): return
+			target_idx = _find_nearest_player_to(enemy)
+			if target_idx >= 0:
+				await _dasher_combo_async(enemy, target_idx)
+		else:
+			# Blocked: band dash toward target + ranged volley
+			var dest := _dasher_best_dash_dest(enemy, 4, "band", p.grid_col, p.grid_row)
+			_dasher_do_dash(enemy, dest)
+			await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+			if not is_instance_valid(enemy) or enemy.hp <= 0 or _all_players_dead(): return
+			target_idx = _find_nearest_player_to(enemy)
+			if target_idx >= 0:
+				await _dasher_ranged_volley_async(enemy, target_idx)
+	else:  # d == 1: adjacent
+		# Action 1: adjacency slam (all adjacent players, stun on miss)
+		await _dasher_adjacency_slam_async(enemy)
+		await get_tree().create_timer(ACTION_DELAY * 0.5).timeout
+		# Action 2: flee dash, max 5 hexes
+		if not is_instance_valid(enemy) or enemy.hp <= 0: return
+		var dest_away := _dasher_best_dash_dest(enemy, 5, "flee", 0, 0)
+		_dasher_do_dash(enemy, dest_away)
+		await get_tree().create_timer(TWEEN_SPEED + 0.1).timeout
 
 func _apply_damage_to_player(target_idx: int, dmg: int, result: String = "hit") -> void:
 	if target_idx < 0 or target_idx >= players.size(): return
@@ -2985,6 +3503,15 @@ func _end_player_turn() -> void:
 	_refresh_tile_colors()
 	_refresh_debug()
 	_refresh_hud()
+	_maybe_skip_stunned_current_player()
+
+func _maybe_skip_stunned_current_player() -> void:
+	if players.is_empty(): return
+	var p = players[current_player_index]
+	if p.stun_turns <= 0: return
+	p.stun_turns -= 1
+	_spawn_damage_popup(p.position + Vector3(0, 1.9, 0), "STUNNED", Color(0.65, 0.65, 0.65))
+	_end_player_turn()
 
 # ─── Snapshot / Undo / Reset ────────────────────────────────
 

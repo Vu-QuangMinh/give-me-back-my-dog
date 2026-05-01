@@ -1097,6 +1097,380 @@ Burn is a stacking damage-over-time effect that applies to **any character** (pl
 - **Display**:
   - Player HUD: small flame icon + stack number next to HP.
   - Enemy: small flame indicator on the enemy's nameplate or HP bar (mirroring however poison is shown — if poison isn't currently shown either, treat that as a follow-up task).
+### Guardian Gorilla — G (silver-blue)
+
+**HP**: 5
+**Actions**: 2 per turn
+**Move**: 2 hexes
+**Behavior**: Aggressive melee. Always moves toward the nearest player. Maintains a shield facing that rotates to face the nearest player at key moments during the turn. Absorbs and redirects projectiles from the shielded arc.
+
+---
+
+#### Shield Facing
+
+Guard always has a **facing direction** — one of the 6 cardinal hex directions. The shield covers a **180° front arc**: the 3 hexes directly in front of Guard (the faced hex and the two hexes flanking it on either side). A blue crescent glow is rendered on those 3 hex tiles to show the current shield arc.
+
+**When facing updates** (in this order each turn):
+1. At the start of Guard's turn, before any action.
+2. After Guard moves (if he moves), before any attack.
+
+At each update point: rotate facing to point toward the **nearest player character** (Sonny or Mike, by hex distance). If both players are equidistant, keep the current facing. Facing is one of the 6 discrete hex directions — pick the direction whose neighbor hex is closest to the target player's current hex.
+
+Facing does **not** update mid-move or during attack resolution. It is a discrete snap at the two update points above.
+
+---
+
+#### Shield Effects
+
+**Damage reduction:**
+Any attack that originates from within the shielded 3-hex arc deals **−1 damage** to Guard (minimum 0). This applies to melee hits, projectile hits, bomb AOE, and burn/poison ticks that were applied from a shielded-direction hit (the tick reduction only applies to the initial hit reduction; DOT ticks themselves are not reduced).
+
+**Projectile redirect:**
+When a projectile enters one of the 3 shielded hexes while traveling toward Guard:
+- Guard automatically redirects it toward the **nearest player character** (no player SPACE input — this is fully automatic).
+- New direction = from Guard's current hex toward the nearest player's current hex, normalized.
+- Ownership is set to **god-owned** (`owner_node = null`) — same as Sonny's perfect redirect. Hits everyone including Sonny and Mike.
+- `negative_bounce` is set to `PROJECTILE_NEG_BOUNCE * 0.5` (half the normal penalty, so the redirected projectile travels farther than a standard bounce).
+- Speed is unchanged at time of redirect.
+- No SPACE window is opened for the player. The redirect is instantaneous.
+
+**Push immunity from the front:**
+Guard cannot be pushed from any direction within the shielded 180° arc. If a push source (Sonny's Boong, Bulldozer charge, etc.) originates from one of the 3 shielded hexes, the push is cancelled — Guard does not move. Push from any of the 3 rear hexes resolves normally.
+
+---
+
+#### AI — turn structure
+
+**At the start of the turn:** update facing toward nearest player.
+
+Evaluate distance `d` to nearest player:
+
+| Condition | Action 1 | Action 2 |
+|---|---|---|
+| No player adjacent AND `d > 2` | Move toward nearest player (BFS, standard) | Update facing → Attack if now adjacent, else skip |
+| No player adjacent AND `d ≤ 2` | Move toward nearest player | Update facing → Attack (A1 if both players adjacent after move, else alternate A1/A2) |
+| Player already adjacent | Update facing → Attack (A1 if both players adjacent, else alternate A1/A2) | Move toward nearest player (reposition) OR skip if already optimal |
+
+**Attack selection:**
+- If **both** Sonny and Mike are adjacent to Guard at the moment of attacking → use **A1** (Stun Slam, hits all 3 front hexes).
+- Otherwise → alternate A1 and A2, starting with A1. Track with `guard_attack_index`.
+
+After move (if any): update facing before attack.
+
+---
+
+#### Attack 1 — Shield Slam (melee, priority when both players adjacent)
+
+Guard slams the shield outward. Hits all **3 hexes in the shielded front arc** simultaneously. One shared SPACE-press window for all affected players (same model as Mage eruption and Dasher adjacency slam — one press resolves all caught players together).
+
+| Player result | Damage | Stun |
+|---|---|---|
+| Perfect dodge | 0 | No |
+| OK dodge | 0 | No |
+| Miss | 0 | Yes — `stun_turns = 1` (skips 1 full turn) |
+
+This attack deals **0 damage** regardless of dodge result. Its only purpose is the stun on miss. Stun applies to each missed player individually.
+
+| # | Range | Damage | AOE | Hits | Special |
+|---|-------|--------|-----|------|---------|
+| A1 | front arc (3 hexes) | 0 | front arc | 1 shared | stun on miss; shared SPACE; 0 damage always |
+
+---
+
+#### Attack 2 — Triple Strike (melee, alternating)
+
+3 sequential dodge bars fired one after another in a single coroutine. All 3 always fire regardless of hit or dodge on previous bars. Each bar deals 1 damage independently. Ball speed escalates across the 3 bars.
+
+| Bar | Ball speed mult | Damage | Perfect Window | OK Window |
+|-----|----------------|--------|----------------|-----------|
+| 1 | 0.7× (slow) | 1 | 0.20s | 0.40s |
+| 2 | 1.0× (medium) | 1 | 0.20s | 0.40s |
+| 3 | 1.5× (fast) | 1 | 0.20s | 0.40s |
+
+| # | Range | Damage | AOE | Hits | Special |
+|---|-------|--------|-----|------|---------|
+| A2 | 1 | 1/hit | 1 | 3 (always all fire) | slow→med→fast bars; targets nearest adjacent player only |
+
+---
+
+#### Preset entry
+
+```gdscript
+### Boxing Bear — R (dark orange)
+
+**HP**: 5
+**Actions**: 1
+**Move**: 2 hexes
+**Behavior**: Aggressive melee. Moves toward nearest player. Attacks if adjacent. One action per turn consumed by either the move or the attack chain.
+
+#### Attack — Boxing Bear Combo
+
+When Boxing Bear attacks, it spawns a **dodge bar** using the same timing windows as Grunt A1 (perfect_window: 0.20s, ok_window: 0.40s, 1 damage per hit), but with the ball moving at **1.5× Grunt's ball speed** (`speed_mult: 1.5`). The timing windows do not change — only the ball is faster, giving the player less time to react.
+
+Unlike a standard melee attack that fires once and ends, the Boxing Bear Combo is a **chain**: each successful dodge by the player triggers another bar immediately, up to a maximum of 5 bars in sequence. Every bar in the chain uses the same `dodge_line` value and the same `speed_mult: 1.5`.
+
+Resolution rules, evaluated after each bar:
+
+| Player result | Damage taken | Chain continues? |
+|---|---|---|
+| Miss (hit zone) | 1 | No — chain ends, Boxing Bear turn ends |
+| OK dodge | 0 | Yes — next bar spawns immediately |
+| Perfect dodge | 0 | Yes — next bar spawns immediately |
+
+The chain ends when either:
+- The player is hit (any result other than perfect or OK), OR
+- The player successfully dodges all 5 bars.
+
+If the player dodges all 5 bars:
+- No damage is dealt.
+- **Boxing Bear is stunned for 1 full turn** (`stun_turns = 1` — see Stun below).
+- Spawn a floating "STUNNED!" label over Boxing Bear in gray.
+
+#### Implementation notes
+
+- The 5-bar chain is a single atomic sequence from `main.gd`'s perspective — it runs inside one `await` coroutine, spawning bars back-to-back. Phase stays in `DODGE_PHASE` for the entire chain.
+- Each bar in the chain uses the same `dodge_line` value (Boxing Bear does not re-roll the timing line between hits in the chain).
+- The chain is not interruptible mid-sequence by other game events — the `DODGE_PHASE` lock already handles this.
+- Track combo progress with a local counter inside the coroutine, not a persistent state var on the enemy — the chain is fully stateless between turns.
+- This attack does NOT use `dual_bar` or `speed_mults`. It is a new action code `"boxing_bear_combo"` returned by `plan_action` and handled explicitly in `main.gd`, separate from the existing `"attack"` path.
+
+#### Stun (new universal effect)
+
+Stun applies to **any character** (players and enemies alike). A stunned unit skips all actions and movement until the stun expires.
+
+**Storage**: `stun_turns: int` on both `Enemy.gd` and `Player.gd`. Initial value 0.
+
+**Application**: set `stun_turns = N`.
+- "1 full turn" means the unit skips its entire next turn. Because `stun_turns` is decremented at the **start** of the unit's turn before checking, `stun_turns = 2` achieves this: decrements to 1 on the turn it was applied (already ending anyway), decrements to 0 at the start of the next turn but skips since `stun_turns > 0` after decrement... 
+
+Actually, to be precise: stun is applied after the chain resolves, at which point Boxing Bear's current turn is already over. So:
+- Set `stun_turns = 1`.
+- At the start of Boxing Bear's NEXT turn: decrement to 0, skip turn entirely since stun was > 0 before decrement.
+- The turn after that: `stun_turns = 0`, acts normally.
+
+So `stun_turns = 1` = skip 1 full turn. Use this value everywhere stun means "miss one turn."
+
+**Tick**: at the start of the stunned unit's turn, before any action:
+```gdscript
+if stun_turns > 0:
+    stun_turns -= 1
+    # skip entire turn — no move, no attack, no special behavior
+    return
+```
+
+**Integration**:
+- For enemies: check `stun_turns` at the top of `_run_enemy_actions`. If `stun_turns > 0`, decrement, skip action loop, return. Still call `tick_turn()` so other per-turn state (charge flags, move flags, etc.) resets normally.
+- For players: check `stun_turns` at the start of the player's turn. If `stun_turns > 0`, decrement, disable all input (movement, attacks, abilities), auto-end their turn. Display a "STUNNED" indicator on their HUD avatar panel.
+- Stun the persistent state of — `pending_eruption` on a Mage, `lock_target_idx` on a Bulldozer, etc. If they are stun, they lose that state and begin their turn according to their own logic.
+- Stun on a Bomb or Dummy has no effect (they already do nothing).
+
+**Display**:
+- Stunned enemy: gray pulsing overlay or floating "STUNNED" label above the unit.
+- Stunned player: grayed-out action indicators in HUD, "STUNNED" label on their avatar panel.
+
+#### Preset entry
+
+```gdscript
+"boxing_bear": {
+    "enemy_type":       "boxing_bear",
+    "display_label":    "R",
+    "max_hp":           5,
+    "actions_per_turn": 1,
+    "move_range":       2,
+    "body_color":       Color(0.85, 0.40, 0.10),
+    "behavior":         Behavior.AGGRESSIVE,
+    "immovable":        false,
+    "range_min":        0,
+    "range_max":        0,
+    "attacks": [
+        # Handled via "boxing_bear_combo" action in main.gd — values here are
+        # for reference and HUD display only.
+        { "range": 1, "damage": 1, "aoe": 1, "hits": 5, "speed": "",
+          "perfect_window": 0.20, "ok_window": 0.40,
+          "dual_bar": false, "speed_mults": [],
+          "boxing_bear_combo": true, "max_chain": 5, "chain_speed_mult": 1.5 },
+    ],
+},
+```
+### Dasher — D (electric blue)
+
+**HP**: 7
+**Actions**: 2 per turn
+**Move**: no standard movement — all repositioning is done via Dash
+**Behavior**: Adaptive skirmisher. Behavior depends entirely on player distance at the start of the turn. Evaluated once at turn-start; does not re-evaluate mid-turn.
+
+---
+
+#### Dash
+
+Dash moves Dasher in a **straight hex line** (one of the 6 cardinal hex directions). The path must be clear — columns, enemies, and players all block the dash. Dasher stops at the last unobstructed hex before any obstacle, or at the maximum dash range for this context, whichever comes first.
+
+Dasher has **no standard BFS movement**. If all 6 directions are blocked at hex 1, the dash action is skipped.
+
+---
+
+#### AI — turn structure
+
+Find the **nearest player** by hex distance. Call their distance `d`. Evaluate once at turn-start.
+
+---
+
+##### Case 1 — Adjacent (`d == 1`)
+
+**Action 1: Adjacency Slam**
+Hit all adjacent tiles simultaneously. One shared SPACE-press window for all affected players (same model as Mage eruption — one press resolves all caught players together).
+
+| Player result | Damage | Stun |
+|---|---|---|
+| Perfect dodge | 0 | No |
+| OK dodge | 1 | No |
+| Miss | 1 | Yes — `stun_turns = 1` |
+
+After the slam resolves (including stun application):
+
+**Action 2: Dash away**
+Dash up to **5 hexes** away. Evaluate all 6 directions, pick the direction and distance that maximizes hex distance to the nearest player after landing. Dasher does not need to use the full 5 hexes — stop at whatever landing hex scores best.
+
+---
+
+##### Case 2 — Mid-range (`2 ≤ d ≤ 3`)
+
+**Pre-calculate before acting:** check whether any straight hex line from Dasher's current position, up to 4 hexes, would land Dasher on a hex adjacent to the nearest player.
+
+**If yes — can reach adjacent:**
+
+Action 1: Dash the **minimum number of hexes** along that line to become adjacent. Do not overshoot.
+
+Action 2: Melee combo — 3 sequential dodge bars in one coroutine, always all 3 fire regardless of hit/dodge on previous bars. 1 damage per bar independently.
+
+| Bar | Ball speed mult | Perfect Window | OK Window |
+|-----|----------------|----------------|-----------|
+| 1 | 0.7× (slow) | 0.20s | 0.40s |
+| 2 | 1.0× (medium) | 0.20s | 0.40s |
+| 3 | 1.5× (fast) | 0.20s | 0.40s |
+
+**If no — cannot reach adjacent within 4 hexes:**
+
+Action 1: Dash up to **4 hexes** in the direction that lands farthest from the nearest player while still making progress (i.e. prefer directions that push distance toward 5–6 range).
+
+Action 2: Ranged attack (A1 or A2, alternating — see below).
+
+---
+
+##### Case 3 — Optimal range (`4 ≤ d ≤ 6`)
+
+**Action 1: Ranged attack** (A1 or A2, alternating).
+
+**Action 2: Repositioning dash** — dash up to **3 hexes** to maintain 5–6 hex distance from the nearest player. If already at 5–6, skip (dash 0). Pick the direction and distance that keeps distance closest to the 5–6 band.
+
+---
+
+##### Case 4 — Too far (`d > 6`)
+
+**Action 1: Dash toward nearest player** — up to **4 hexes**, along the straight line that gets closest to the 5–6 range band from the player.
+
+**Action 2: Ranged attack** (A1 or A2, alternating) — fires regardless of whether the dash fully closed the gap.
+
+---
+
+#### Attack 1 — Triple Shot (ranged, alternating)
+
+3 projectiles fired in sequence at the nearest in-range player. Fixed speed: **fast**. 0.2s interval between each. Each projectile uses the standard real-time SPACE reaction (§5B), not a dodge bar. `negative_bounce = 9999`.
+
+| # | Range | Damage | Hits | Speed | Interval |
+|---|-------|--------|------|-------|----------|
+| A1 | 6 | 1/hit | 3 | fast | 0.2s |
+
+---
+
+#### Attack 2 — Barrage (ranged, alternating)
+
+5 projectiles fired in sequence at the nearest in-range player. Fixed speed: **slow**. 0.1s interval between each. Same real-time SPACE reaction. `negative_bounce = 9999`.
+
+| # | Range | Damage | Hits | Speed | Interval |
+|---|-------|--------|------|-------|----------|
+| A2 | 6 | 1/hit | 5 | slow | 0.1s |
+
+Ranged attacks alternate: A1 first, then A2, then A1, etc. Tracked via `dash_attack_index` on the enemy instance.
+
+---
+
+#### Preset entry
+
+```gdscript
+"dasher": {
+    "enemy_type":       "dasher",
+    "display_label":    "D",
+    "max_hp":           7,
+    "actions_per_turn": 2,
+    "move_range":       0,
+    "body_color":       Color(0.20, 0.70, 1.00),
+    "behavior":         Behavior.DASHER,
+    "immovable":        false,
+    "range_min":        4,
+    "range_max":        6,
+    "attacks": [
+        # A1 — Triple Shot
+        { "range": 6, "damage": 1, "aoe": 1, "hits": 3, "speed": "fast",
+          "perfect_window": 0.0, "ok_window": 0.0,
+          "dual_bar": false, "speed_mults": [], "no_bounce": true,
+          "hit_interval": 0.2 },
+        # A2 — Barrage
+        { "range": 6, "damage": 1, "aoe": 1, "hits": 5, "speed": "slow",
+          "perfect_window": 0.0, "ok_window": 0.0,
+          "dual_bar": false, "speed_mults": [], "no_bounce": true,
+          "hit_interval": 0.1 },
+        # A3 — Adjacency Slam (handled via "adjacency_slam" in main.gd)
+        { "range": 1, "damage": 1, "aoe": 2, "hits": 1, "speed": "",
+          "perfect_window": 0.20, "ok_window": 0.40,
+          "dual_bar": false, "speed_mults": [0.70],
+          "adjacency_slam": true, "stun_on_miss": true },
+        # A4 — Dash Combo (handled via "dash_combo" in main.gd)
+        { "range": 1, "damage": 1, "aoe": 1, "hits": 3, "speed": "",
+          "perfect_window": 0.20, "ok_window": 0.40,
+          "dual_bar": false, "speed_mults": [0.70, 1.00, 1.50] },
+    ],
+},
+```
+
+**New runtime state on `Enemy.gd`:**
+```gdscript
+var dash_attack_index : int    = 0    # alternates A1/A2 for ranged volleys
+var turn_state        : String = ""   # "adjacent"|"mid"|"optimal"|"far" — set once at turn-start
+```
+
+**New behavior enum entry:**
+```gdscript
+enum Behavior { AGGRESSIVE, RANGER, DUMMY, BULLDOZER, MAGE, RELENTLESS, DASHER }
+```
+
+**New action codes for `main.gd`:**
+- `"dash_toward"` — dash up to N hexes toward nearest player, targeting the 5–6 band or adjacency depending on context
+- `"dash_away"` — dash up to 5 hexes maximizing distance from all players
+- `"dash_reposition"` — dash up to 3 hexes to maintain 5–6 band
+- `"adjacency_slam"` — Case 1 melee, shared SPACE, stun on miss
+- `"dash_combo"` — Case 2 melee, 3 bars slow→medium→fast, all always fire
+- `"ranged_volley"` — fires A1 or A2 based on `dash_attack_index`, then increments it
+
+**Stats summary:**
+
+| Attack | Trigger | Range | Damage | Hits | Special |
+|--------|---------|-------|--------|------|---------|
+| A1 Triple Shot | d ≥ 4 or fallback | 6 | 1/hit | 3 | fast, 0.2s interval |
+| A2 Barrage | d ≥ 4 or fallback | 6 | 1/hit | 5 | slow, 0.1s interval |
+| A3 Adjacency Slam | d == 1 | all adj | 1 | shared | OK dodge = dmg no stun; perfect = dodge both; miss = dmg + stun |
+| A4 Dash Combo | 2 ≤ d ≤ 3, can reach adj | 1 | 1/hit | 3 | slow→med→fast bars, all always fire |
+
+**Special flags**: dash-only-movement, ranged-alternating, adjacency-slam, dash-combo, stun-on-miss
+**Notes**: All case evaluation happens once at turn-start using initial player positions. Dash is always straight-line, stops at first obstacle. Pre-calculation for Case 2 adjacency reachability must happen before any action is taken. See Stun section (Relentless entry) for `stun_turns` tick and integration rules. See §5B for real-time projectile reaction used by A1 and A2.
+#### Stats table
+
+| # | Range | Damage | AOE | Hits | Speed | Perfect Window | OK Window | Special |
+|---|-------|--------|-----|------|-------|----------------|-----------|---------|
+| A1 | 1 | 1 | 1 | up to 5 | — | 0.20s | 0.40s | ball speed ×1.5; chain stops on first hit; all-5-dodge = self-stun 1 turn |
+
+**Special flags**: boxing_bear_combo, applies-stun-on-all-dodge
+**Notes**: `plan_action` returns `"boxing_bear_combo"` when adjacent. `main.gd` runs the full chain in one coroutine, passing `speed_mult: 1.5` to each `DodgeBarScene`. Stun is universal — add `stun_turns: int` to both `Enemy.gd` and `Player.gd`. `stun_turns = 1` = skip 1 full turn. See Stun section for tick and integration rules.
 ### Training Dummy — D (green)
 
 **HP**: 5 (resets to full at the start of its own turn if damaged)

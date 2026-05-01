@@ -1,6 +1,6 @@
-[gd_scene load_steps=2 format=3 uid="uid://kpwqekvdycho"]
+[gd_scene format=3 uid="uid://kpwqekvdycho"]
 
-[ext_resource type="Script" path="res://hextile.gd" id="1_tqxos"]
+[ext_resource type="Script" uid="uid://chvmsfpnq4c2s" path="res://hextile.gd" id="1_tqxos"]
 
-[node name="Hextile" type="Node3D"]
+[node name="Hextile" type="Node3D" unique_id=1949876941]
 script = ExtResource("1_tqxos")

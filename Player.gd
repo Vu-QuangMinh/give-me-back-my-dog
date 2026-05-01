@@ -126,6 +126,7 @@ var burn_stacks    : int = 0
 var actions_left  : int  = 2
 var has_attacked  : bool = false
 var disarmed      : bool = false
+var stun_turns    : int  = 0      # turns remaining to skip (1 = skip 1 full turn)
 var floor_cleared : bool = false
 
 # ── Per-character tuning (read from preset, never touch directly) ──
