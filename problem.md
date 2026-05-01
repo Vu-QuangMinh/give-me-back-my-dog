@@ -10,4 +10,3 @@
 10) Perfect range for for Mike: Store the bullets, have a text written as caught it.
 11) Where is the world map ?
 
-Dasher: 
