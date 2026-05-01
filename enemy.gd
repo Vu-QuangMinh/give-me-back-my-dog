@@ -140,23 +140,6 @@ const ENEMY_PRESETS : Dictionary = {
 		"range_max":        0,
 		"attacks":          [],  # charge is handled directly in main.gd
 	},
-	"dasher": {
-		"enemy_type":       "dasher",
-		"display_label":    "D",
-		"max_hp":           2,                      # mỏng máu — đổi lấy tốc độ
-		"actions_per_turn": 2,
-		"move_range":       4,                      # dash xa nhất
-		"body_color":       Color(0.95, 0.65, 0.15),   # vàng cam — speed
-		"behavior":         Behavior.AGGRESSIVE,
-		"immovable":        false,
-		"range_min":        0,
-		"range_max":        0,
-		"attacks": [
-			{ "range": 1, "damage": 1, "aoe": 1, "hits": 1, "speed": "",
-			  "perfect_window": 0.16, "ok_window": 0.32,
-			  "dual_bar": false, "speed_mults": [] },
-		],
-	},
 	"gunner": {
 		"enemy_type":       "gunner",
 		"display_label":    "U",
