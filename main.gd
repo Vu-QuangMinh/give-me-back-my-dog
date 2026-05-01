@@ -69,8 +69,9 @@ const FLOOR_SCENARIOS : Array = [
 		"is_boss": false,
 		"columns": [],
 		"decorations": [
-			# House mới: cùng X-line với tile C,0 (X=-5.25), Z lùi sau grid (-10).
-			{ "scene": "house", "pos": Vector3(-5.25, 0.2, -10.0), "scale": 5.0, "rot_y_deg": 0.0 },
+			# House mới: X=-5, Z=-11 (lùi xa sau grid để không che ô hex front).
+			# Y=0.2 = TILE_HEIGHT → nền nhà ngang bằng mặt trên ô hex.
+			{ "scene": "house", "pos": Vector3(-5.0, 0.2, -11.0), "scale": 1.0, "rot_y_deg": 0.0 },
 		],
 		"random_trees": 3,    # cây random trên hex tiles trống (tree = obstacle)
 		"random_fires": 2,    # đám lửa random trên hex tiles trống (fire = -1 HP khi đi qua)
@@ -80,6 +81,8 @@ const FLOOR_SCENARIOS : Array = [
 			{ "type": "grunt",     "col": 8, "row": 5 },
 			{ "type": "assassin",  "col": 0, "row": 0 },   # dùng model Squirrel
 			{ "type": "bulldozer", "col": 0, "row": 0 },   # dùng model Bull
+			{ "type": "dasher",    "col": 0, "row": 0 },   # nhanh, mỏng máu
+			{ "type": "gunner",    "col": 0, "row": 0 },   # ranged sniper
 		],
 	},
 	# Floor 1 — basic: + 1 archer + 1 column
@@ -392,18 +395,125 @@ func _ready() -> void:
 	_setup_decorations()    # Mốc 9.1: load .glb decorations (cây, etc.)
 	_setup_coord_grid()     # Debug overlay (F4 toggle)
 	_spawn_players()
-	_spawn_enemies()
+	# Place trees/fires TRƯỚC khi spawn enemies → enemy._random_enemy_spawn_tile
+	# sẽ skip tile có cây/lửa (xem filter trong hàm đó).
 	_place_border_trees()   # cây cố định row 0/7
 	_scatter_random_trees() # cây random hex tiles trống (obstacle)
 	_scatter_random_fires() # đám lửa random hex tiles trống (-1 HP)
+	_spawn_enemies()
 	_face_all_players_to_enemies()
+	_face_all_enemies_to_players()
 	_update_valid_moves()
 	_save_turn_snapshot()
 	_refresh_tile_colors()
 	get_viewport().size_changed.connect(_on_viewport_resized)
 	_on_viewport_resized()  # set zoom + cập nhật camera lần đầu
 	_init_hud()
+	_spawn_time_of_day_ui()
 	_refresh_debug()
+
+# ═══════════════════════════════════════════════════════════
+#  TIME OF DAY (slider giờ + Day/Night toggle)
+# ═══════════════════════════════════════════════════════════
+
+var _time_of_day : TimeOfDay = null
+var _time_hour_label : Label = null
+var _time_toggle_btn : Button = null
+
+func _spawn_time_of_day_ui() -> void:
+	var sun_node = get_node_or_null("Sun") as DirectionalLight3D
+	if sun_node == null:
+		print("[TimeOfDay] không tìm thấy Sun node — skip")
+		return
+	var env_node = get_node_or_null("WorldEnvironment") as WorldEnvironment
+	var env_resource : Environment = null
+	if env_node and env_node.environment:
+		env_resource = env_node.environment
+	_time_of_day = TimeOfDay.new()
+	_time_of_day.name = "TimeOfDay"
+	add_child(_time_of_day)
+	_time_of_day.setup(sun_node, env_resource)
+
+	# UI ─────────────────────────────────────
+	var layer := CanvasLayer.new()
+	layer.layer = 6   # trên HUD (5)
+	layer.name = "TimeOfDayUI"
+	add_child(layer)
+
+	var bg := PanelContainer.new()
+	bg.anchor_left = 0.0; bg.anchor_top = 1.0
+	bg.anchor_right = 0.0; bg.anchor_bottom = 1.0
+	bg.offset_left = 20.0
+	bg.offset_top  = -100.0
+	bg.offset_right = 380.0
+	bg.offset_bottom = -20.0
+	layer.add_child(bg)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	bg.add_child(vb)
+
+	# Top row: hour label + toggle button
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 8)
+	vb.add_child(top)
+
+	_time_hour_label = Label.new()
+	_time_hour_label.text = "12:00"   # slider default 6 + day base 6 = 12:00
+	_time_hour_label.custom_minimum_size = Vector2(80, 24)
+	_time_hour_label.add_theme_color_override("font_color", Color(1, 1, 0.85))
+	top.add_child(_time_hour_label)
+
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(spacer)
+
+	_time_toggle_btn = Button.new()
+	_time_toggle_btn.text = "Ngày"
+	_time_toggle_btn.toggle_mode = true
+	_time_toggle_btn.custom_minimum_size = Vector2(80, 24)
+	top.add_child(_time_toggle_btn)
+
+	# Slider 0..12
+	var slider := HSlider.new()
+	slider.min_value = 0.0
+	slider.max_value = 12.0
+	slider.step = 0.1
+	slider.value = 6.0
+	slider.custom_minimum_size = Vector2(340, 28)
+	vb.add_child(slider)
+
+	# Wire signals
+	slider.value_changed.connect(_on_time_slider_changed)
+	_time_toggle_btn.toggled.connect(_on_time_toggle)
+
+	# Init lighting với value mặc định
+	_time_of_day.set_value(slider.value)
+
+func _on_time_slider_changed(v: float) -> void:
+	if _time_of_day == null: return
+	_time_of_day.set_value(v)
+	_refresh_time_label(v)
+
+# Map slider 0..12 → giờ thực:
+#   Day:   6:00 → 18:00 (slider 0 = 6, slider 12 = 18)
+#   Night: 18:00 → 6:00 hôm sau (qua 23:59 → 00:00 → 6:00)
+func _refresh_time_label(v: float) -> void:
+	if _time_hour_label == null: return
+	var base : float = 6.0
+	if _time_of_day != null and _time_of_day.is_night:
+		base = 18.0
+	var total : float = fmod(base + v, 24.0)
+	var h : int = int(total)
+	var m : int = int((total - h) * 60.0)
+	_time_hour_label.text = "%02d:%02d" % [h, m]
+
+func _on_time_toggle(pressed: bool) -> void:
+	if _time_of_day == null: return
+	_time_of_day.set_night(pressed)
+	if _time_toggle_btn:
+		_time_toggle_btn.text = "Đêm" if pressed else "Ngày"
+	_refresh_time_label(_time_of_day.slider_value)
 
 # ═══════════════════════════════════════════════════════════
 #  HUD WIRING (Mốc 5)
@@ -509,15 +619,25 @@ func _on_viewport_resized() -> void:
 # ═══════════════════════════════════════════════════════════
 
 func _build_grid() -> void:
+	# Layout map theo row:
+	#   Row 0 (A-L)         → GRASS  (cỏ rìa)
+	#   Row 1 (A-L)         → CEMENT (vỉa hè)
+	#   Row 2               → NORMAL (đất)
+	#   Row 3, 4, 5         → ASPHALT (mặt đường nhựa)
+	#   Row 6 (A-L)         → CEMENT (vỉa hè)
+	#   Row 7 (A-I, col≤8)  → GRASS  (cỏ rìa, J-L vẫn NORMAL)
 	for col in range(GRID_COLS):
 		for row in range(GRID_ROWS):
 			var key  : Vector2i = Vector2i(col, row)
 			var tile           = HexTileScene.instantiate()
 			add_child(tile)
-			# Row 0 (toàn bộ A-L) + Row 7 từ A,7..I,7 (col 0..8): ô cỏ.
 			var t = HexTileScript.Type.NORMAL
 			if row == 0:
 				t = HexTileScript.Type.GRASS
+			elif row == 1 or row == 6:
+				t = HexTileScript.Type.CEMENT
+			elif row == 3 or row == 4 or row == 5:
+				t = HexTileScript.Type.ASPHALT
 			elif row == GRID_ROWS - 1 and col <= 8:
 				t = HexTileScript.Type.GRASS
 			tile.setup(col, row, t)
@@ -758,6 +878,36 @@ func _check_fire_step_enemy(enemy: Node) -> void:
 	enemy.take_damage(FIRE_STEP_DAMAGE)
 	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
 		"-%d FIRE" % FIRE_STEP_DAMAGE, Color(1.0, 0.55, 0.20))
+	if enemy.hp <= 0:
+		_kill_enemy(enemy)
+	elif hud != null:
+		hud.update_enemy_hp(enemy.get_instance_id(), enemy.hp, enemy.max_hp)
+
+# Đếm số ô fire pit trên đường đi src→dest (bỏ qua start, tính cả dest).
+# Mỗi ô lửa đi qua = -FIRE_STEP_DAMAGE HP (đi qua cũng cháy, không chỉ đứng).
+func _count_fires_on_path(src: Vector2i, dest: Vector2i) -> int:
+	if src == dest: return 0
+	var path : Array = _hex_line(src.x, src.y, dest.x, dest.y)
+	var fires : int = 0
+	for i in range(1, path.size()):   # skip src
+		if path[i] in fire_pit_tiles:
+			fires += 1
+	return fires
+
+func _apply_fire_path_damage_player(player_idx: int, src: Vector2i, dest: Vector2i) -> void:
+	if player_idx < 0 or player_idx >= players.size(): return
+	var fires : int = _count_fires_on_path(src, dest)
+	if fires <= 0: return
+	_apply_damage_to_player(player_idx, FIRE_STEP_DAMAGE * fires, "hit")
+
+func _apply_fire_path_damage_enemy(enemy: Node, src: Vector2i, dest: Vector2i) -> void:
+	if not is_instance_valid(enemy): return
+	var fires : int = _count_fires_on_path(src, dest)
+	if fires <= 0: return
+	var dmg : int = FIRE_STEP_DAMAGE * fires
+	enemy.take_damage(dmg)
+	_spawn_damage_popup(enemy.position + Vector3(0, 1.8, 0),
+		"-%d FIRE" % dmg, Color(1.0, 0.55, 0.20))
 	if enemy.hp <= 0:
 		_kill_enemy(enemy)
 	elif hud != null:
@@ -1004,6 +1154,28 @@ func _face_all_players_to_enemies() -> void:
 	for i in range(players.size()):
 		_face_player_to_nearest_enemy(i)
 
+# Quay enemy về player gần nhất (theo grid_col/grid_row → world pos).
+# Reuse _face_player_to_position vì Mixamo flip logic generic — cả player +
+# enemy LP models đều face +Z.
+func _face_enemy_to_nearest_player(enemy: Node) -> void:
+	if not is_instance_valid(enemy): return
+	if players.is_empty(): return
+	var best_idx : int = -1
+	var best_d   : int = 9999
+	for i in range(players.size()):
+		if players[i].hp <= 0: continue
+		var d : int = _hex_dist(enemy.grid_col, enemy.grid_row,
+				players[i].grid_col, players[i].grid_row)
+		if d < best_d:
+			best_d = d
+			best_idx = i
+	if best_idx < 0: return
+	_face_player_to_position(enemy, players[best_idx].position)
+
+func _face_all_enemies_to_players() -> void:
+	for e in enemies:
+		_face_enemy_to_nearest_player(e)
+
 # Quay player về một vị trí world XZ cụ thể (target attack hiện tại). Dùng
 # trước khi play_attack để animation đánh hướng đúng vào địch đang đánh.
 func _face_player_to_position(p: Node, target_pos: Vector3) -> void:
@@ -1049,10 +1221,18 @@ func _spawn_enemies() -> void:
 # Random tile NORMAL trống, cách player ≥ 3 hex (không spawn quá gần).
 const ENEMY_SPAWN_MIN_DIST : int = 3
 func _random_enemy_spawn_tile(used: Dictionary) -> Vector2i:
+	# Spawn trên mọi tile gameplay walkable: NORMAL (đất), CEMENT (vỉa hè),
+	# ASPHALT (đường nhựa). Skip GRASS (rìa map), COLUMN, FIRE_PIT, ô có cây.
 	var candidates : Array = []
 	for k in tiles.keys():
-		if tiles[k].tile_type != HexTileScript.Type.NORMAL: continue
+		var t = tiles[k].tile_type
+		if t != HexTileScript.Type.NORMAL \
+				and t != HexTileScript.Type.CEMENT \
+				and t != HexTileScript.Type.ASPHALT:
+			continue
 		if k in column_tiles: continue
+		if k in tree_tiles: continue        # ko spawn trên ô có cây
+		if k in fire_pit_tiles: continue    # ko spawn trên bãi lửa
 		if used.has(k): continue
 		var skip : bool = false
 		for pos in player_positions:
@@ -1201,7 +1381,7 @@ func _move_player(dest: Vector2i) -> void:
 		tween.tween_callback(current_player.play_idle)
 	current_player.use_action()
 	_face_all_players_to_enemies()   # quay mặt về địch gần nhất
-	_check_fire_step_player(current_player_index)   # ô lửa: -1 HP
+	_apply_fire_path_damage_player(current_player_index, src, dest)   # ô lửa trên đường đi: -1 HP/ô
 	_update_valid_moves()
 	_refresh_tile_colors()
 	_refresh_debug()
@@ -2005,6 +2185,7 @@ func _grapple_at(hex: Vector2i) -> void:
 
 # Move entity to dest hex (smooth tween) + cập nhật state.
 func _apply_grapple_pull(entity: Node, dest: Vector2i) -> void:
+	var src : Vector2i = Vector2i(entity.grid_col, entity.grid_row)
 	entity.grid_col = dest.x
 	entity.grid_row = dest.y
 	_move_entity_smooth(entity, dest.x, dest.y)
@@ -2013,11 +2194,11 @@ func _apply_grapple_pull(entity: Node, dest: Vector2i) -> void:
 	for i in range(players.size()):
 		if players[i] == entity:
 			player_positions[i] = dest
-			_check_fire_step_player(i)
+			_apply_fire_path_damage_player(i, src, dest)
 			is_player = true
 			break
 	if not is_player:
-		_check_fire_step_enemy(entity)
+		_apply_fire_path_damage_enemy(entity, src, dest)
 
 # Visual: BoxMesh thin nối start↔end, hold 0.20s rồi fade alpha 0.30s.
 func _spawn_grapple_line(start: Vector3, end: Vector3) -> void:
@@ -2152,10 +2333,11 @@ func _push_enemy(enemy: Node, from_col: int, from_row: int, push_value: int) -> 
 			_apply_damage_to_player(other_p_idx, 1, "hit")
 		return
 
+	var src : Vector2i = Vector2i(enemy.grid_col, enemy.grid_row)
 	enemy.grid_col = dest.x
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
-	_check_fire_step_enemy(enemy)   # ô lửa: -1 HP khi bị đẩy lên
+	_apply_fire_path_damage_enemy(enemy, src, dest)   # mỗi ô lửa đi qua: -1 HP
 
 # Push a player by giving the "from" hex so direction = dest - player_hex.
 func _push_player(player_idx: int, from_col: int, from_row: int, push_value: int) -> void:
@@ -2472,24 +2654,28 @@ func _run_enemy_actions(enemy: Node) -> void:
 func _enemy_move_toward(enemy: Node, target_idx: int) -> void:
 	var p = players[target_idx]
 	var occupied : Dictionary = _build_occupied(enemy)
+	var src : Vector2i = Vector2i(enemy.grid_col, enemy.grid_row)
 	var dest : Vector2i = enemy.best_move_toward(p.grid_col, p.grid_row, occupied, self)
 	if dest.x < 0: return
 	enemy.grid_col = dest.x
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
-	_check_fire_step_enemy(enemy)   # ô lửa: -1 HP
+	_face_enemy_to_nearest_player(enemy)   # quay mặt sau khi di chuyển
+	_apply_fire_path_damage_enemy(enemy, src, dest)   # mỗi ô lửa đi qua: -1 HP
 	_update_valid_moves()
 	_refresh_tile_colors()
 
 func _enemy_move_away(enemy: Node, target_idx: int) -> void:
 	var p = players[target_idx]
 	var occupied : Dictionary = _build_occupied(enemy)
+	var src : Vector2i = Vector2i(enemy.grid_col, enemy.grid_row)
 	var dest : Vector2i = enemy.best_move_away(p.grid_col, p.grid_row, occupied, self)
 	if dest.x < 0: return
 	enemy.grid_col = dest.x
 	enemy.grid_row = dest.y
 	_move_entity_smooth(enemy, dest.x, dest.y)
-	_check_fire_step_enemy(enemy)   # ô lửa: -1 HP
+	_face_enemy_to_nearest_player(enemy)   # quay mặt sau khi di chuyển
+	_apply_fire_path_damage_enemy(enemy, src, dest)   # mỗi ô lửa đi qua: -1 HP
 	_update_valid_moves()
 	_refresh_tile_colors()
 

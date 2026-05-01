@@ -14,6 +14,82 @@ nhóm theo mốc (Mốc N) và loại thay đổi.
 Toàn bộ branch chuyển game từ 2D Node2D sang 3D Node3D, giữ 100% gameplay
 mechanics, swap visual sang model `.glb` thật cho 2 nhân vật.
 
+### LP enemy refactor + day-night cycle (2026-05-02)
+
+**Enemy models — low-poly migration**
+- Thay 3 model cũ (Crab, Squirrel/Assassin, Bull) bằng phiên bản LP (low-poly), mỗi model 1 file thay cho cặp Base/Walk
+- Generic dual-model dispatch trong `enemy.gd` qua `DUAL_MODEL_SCENES` dict per `enemy_type`
+- Auto-fit scale dùng đơn vị mét thật (target 0.58–1.5m) thay cho hack 0.015 cũ (compensate AABB micro)
+
+**New enemies**
+- **Dasher** (`enemy_type: "dasher"`): AGGRESSIVE, HP 2, move_range 4, melee dmg 1 — skirmisher tốc độ; model dài (Z ≈ 1.46m sau scale)
+- **Gunner** (`enemy_type: "gunner"`): RANGER, HP 2, range 5, dmg 1 fast projectile, single action/turn — sniper
+
+**Spawn logic**
+- Đảo thứ tự `_ready`: place_border_trees + scatter_random_trees/fires TRƯỚC `_spawn_enemies` → enemy tự né tile cây/lửa
+- `_random_enemy_spawn_tile`: chấp nhận thêm `Type.CEMENT` + `Type.ASPHALT` (trước chỉ NORMAL → enemy clump 1 hàng); skip thêm `tree_tiles` + `fire_pit_tiles`
+- Auto face-nearest-player cho mọi enemy: `_face_all_enemies_to_players()` sau spawn + `_face_enemy_to_nearest_player()` sau mỗi `_enemy_move_*`
+
+**Map texture (HexTile.Type)**
+- Thêm `Type.CEMENT` + `Type.ASPHALT` (procedural texture, static `_cement_texture` / `_asphalt_texture`)
+- `_build_grid` row dispatcher: row 0/7 GRASS, row 1/6 CEMENT (vỉa hè), row 3/4/5 ASPHALT (đường nhựa)
+- State tints (hover/valid/attack) reuse same multiplicative logic như GRASS
+
+**Path-based fire damage**
+- `_count_fires_on_path(src, dest)` + `_apply_fire_path_damage_player/enemy` dùng `_hex_line` đếm fire trên đường đi
+- Replace `_check_fire_step_*` ở mọi move site (`_move_player`, `_apply_grapple_pull`, `_push_enemy`, `_enemy_move_toward/away`)
+- Damage = `FIRE_STEP_DAMAGE × số ô fire trên path` (skip src, count dest)
+
+**Day-night cycle (`time_of_day.gd` + UI)**
+- `TimeOfDay` Node — quản lý DirectionalLight3D `Sun` + Environment ambient
+- HSlider 0–12 + Day/Night toggle button (CanvasLayer 6, anchor bottom-left)
+- Hour mapping: Day = `6 + slider` (06:00..18:00), Night = `(18 + slider) mod 24` (18:00..06:00)
+- Sun/moon arc: `Vector3(cos(π·t), sin(π·t), 0.3) × 100` rồi `look_at(origin)`
+- Day: warm cam → trắng-vàng đỉnh; Night: moon trắng-xanh lạnh
+- Dusk window (night slider 0..3 = 18:00..21:00): blend sun-sunset → moon, smooth handoff với 18:00 day
+- Ambient blend tương ứng (warm day → cold night)
+
+**House model**
+- Replace với model low-poly hơn từ user upload, scale 1.0 (footprint ~1.9 × 1.6m), pos (-5, 0.2, -11)
+
+**Asset size analysis**
+- Build .exe ~243 MB. Phát hiện ~52 MB orphan textures (House_*.jpg, Mike/Sonny _texture.png — đã embed trong .glb)
+- Recommend: xóa orphan + thay Mike/Sonny bằng low-poly → giảm build xuống ~150 MB
+
+---
+
+### Map decorations + grass texture + new enemies (2026-04-30 → 2026-05-01)
+
+**Hex tile labeling + grass texture**
+- Coord label "<COL_LETTER>,<row>" (vd `A,0`, `F,3`) trên mặt mỗi hex tile, font_size 64, lying flat — user dễ chỉ định ô cụ thể khi giao việc
+- `Type.GRASS` mới: procedural FastNoiseLite cellular texture, share via `static var _grass_texture`
+- Row 0 (toàn bộ A-L) + row 7 col 0..8 → GRASS visual
+
+**Tree obstacle + fire-pit step damage**
+- `tree_tiles : Dictionary` mới — ô có cây = obstacle (BFS skip, `is_valid_and_passable` skip)
+- `fire_pit_tiles` populated bởi `scatter_random_fires` — đứng/đi qua ô lửa = -1 HP
+- Wire vào tất cả move sites (player, enemy, grapple, push)
+
+**Border trees + random scatter**
+- `BORDER_TREE_TILES` cố định ở row 0 (E,G,I,K) + row 7 (B,D,F,H,J,L) — tổng 10 cây edge
+- `scatter_random_trees` + `scatter_random_fires`: random N tile NORMAL trống
+
+**New enemies (high-poly model — sau replaced bởi LP version 2026-05-02)**
+- Squirrel (sau rename → assassin merge với remote): AGGRESSIVE, HP 2, move_range 3
+- Bulldozer: BULLDOZER behavior, HP 5, charge mechanic
+- Dual-model setup (Base + Walk) với visibility swap; AnimationPlayer auto-play để model thật sự animate (trước chỉ T-pose vì AP không autoplay)
+
+**Map house + sidewalk**
+- Replace `Map/autumn_house.glb` (37MB) bằng `Map/Level Asset/Level 1/House.glb` (70MB)
+- Decoration dict thêm field `tile : Vector2i` để tính `hex_to_world(tile)` (thay cho hard-coded `pos : Vector3`)
+- `_build_sidewalk()` PlaneMesh 40 × 30 ở Y=0 màu xám matte — user đặt decoration lên đó
+
+**Project cleanup + GitHub push**
+- Xóa ~95MB Map asset rác (autumn_house, grass.glb, sample placeholder, House.glb cũ)
+- Xóa orphan code (pixel_house, archer/grunt/item .uid)
+- Update `.gitignore` thêm `*.console.exe`, `NVIDIA Corporation/`, `desktop.ini`
+- Merge với remote work (mage enemy + assassin update với poison/dual-bar từ collaborator), push lên `port-3d`
+
 ### Polish + bug fixes (2026-04-29)
 
 **Projectile system**

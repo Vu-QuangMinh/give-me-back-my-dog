@@ -140,6 +140,40 @@ const ENEMY_PRESETS : Dictionary = {
 		"range_max":        0,
 		"attacks":          [],  # charge is handled directly in main.gd
 	},
+	"dasher": {
+		"enemy_type":       "dasher",
+		"display_label":    "D",
+		"max_hp":           2,                      # mỏng máu — đổi lấy tốc độ
+		"actions_per_turn": 2,
+		"move_range":       4,                      # dash xa nhất
+		"body_color":       Color(0.95, 0.65, 0.15),   # vàng cam — speed
+		"behavior":         Behavior.AGGRESSIVE,
+		"immovable":        false,
+		"range_min":        0,
+		"range_max":        0,
+		"attacks": [
+			{ "range": 1, "damage": 1, "aoe": 1, "hits": 1, "speed": "",
+			  "perfect_window": 0.16, "ok_window": 0.32,
+			  "dual_bar": false, "speed_mults": [] },
+		],
+	},
+	"gunner": {
+		"enemy_type":       "gunner",
+		"display_label":    "U",
+		"max_hp":           2,
+		"actions_per_turn": 1,
+		"move_range":       1,                      # chậm, giữ khoảng cách
+		"body_color":       Color(0.40, 0.45, 0.65),   # xanh xám — vibe sniper
+		"behavior":         Behavior.RANGER,
+		"immovable":        false,
+		"range_min":        2,
+		"range_max":        5,
+		"attacks": [
+			{ "range": 5, "damage": 1, "aoe": 1, "hits": 1, "speed": "fast",
+			  "perfect_window": 0.0, "ok_window": 0.0,
+			  "dual_bar": false, "speed_mults": [], "no_bounce": true },
+		],
+	},
 	"bomb": {
 		"enemy_type":       "bomb",
 		"display_label":    "B",
@@ -225,28 +259,48 @@ var model_node : MeshInstance3D = null
 # ═══════════════════════════════════════════════════════════════════
 
 const DUAL_MODEL_SCENES : Dictionary = {
+	# 3 enemy LP (low poly) — mỗi model có 1 .glb duy nhất với anim embedded.
+	# Đặt cùng scene cho cả base + walk slot: visibility swap thành no-op,
+	# anim chạy liên tục từ AnimationPlayer trong .glb (không phân biệt
+	# idle/walk pose vì model gộp 1).
 	"grunt": [
-		preload("res://Enemies/Skull Crab/Skull Crab Base.glb"),
-		preload("res://Enemies/Skull Crab/Skull Crab Walk.glb"),
+		preload("res://Enemies/Skull Crab/Skull Crab LP.glb"),
+		preload("res://Enemies/Skull Crab/Skull Crab LP.glb"),
 	],
 	"assassin": [
-		preload("res://Enemies/squirrel/Squirrel Base.glb"),
-		preload("res://Enemies/squirrel/Squirrel Walk.glb"),
+		preload("res://Enemies/Assasin/Squirrel LP.glb"),
+		preload("res://Enemies/Assasin/Squirrel LP.glb"),
 	],
 	"bulldozer": [
-		preload("res://Enemies/Bull/Bull Base.glb"),
-		preload("res://Enemies/Bull/Bull Walk.glb"),
+		preload("res://Enemies/Bull/BullLP.glb"),
+		preload("res://Enemies/Bull/BullLP.glb"),
+	],
+	"dasher": [
+		preload("res://Enemies/Dasher/Dasher LP.glb"),
+		preload("res://Enemies/Dasher/Dasher LP.glb"),
+	],
+	"gunner": [
+		preload("res://Enemies/Gunner/Gunner LP.glb"),
+		preload("res://Enemies/Gunner/Gunner LP.glb"),
 	],
 }
 
-# Target visible height per enemy_type. Skinned mesh AABB undercount → auto-fit
-# cần factor lớn. Base = 0.015; tinh chỉnh per-type qua multiplier.
+# Target visible height (mét) per enemy_type. LP models có AABB chuẩn ~1m,
+# scale tới target sẽ ra height visible thực tế.
 const DUAL_MODEL_TARGET_HEIGHT : Dictionary = {
-	"grunt":     0.015 * 0.9,    # crab × 0.9
-	"assassin":  0.015 * 0.8,    # squirrel × 0.8 (model dùng cho assassin)
-	"bulldozer": 0.015,           # bull
+	"grunt":     0.8 * 0.9 * 0.8,    # Skull Crab — nhỏ × 0.9 × 0.8
+	"assassin":  0.9 * 0.9,           # Squirrel — × 0.9
+	"bulldozer": 1.5 * 0.8,           # Bull — lớn × 0.8
+	"dasher":    0.7 * 1.5,           # Dasher — × 1.5 (to lên 50%)
+	"gunner":    0.9,                  # Gunner — sẽ tinh chỉnh sau visual check
 }
-const DUAL_MODEL_TARGET_HEIGHT_DEFAULT : float = 0.015
+const DUAL_MODEL_TARGET_HEIGHT_DEFAULT : float = 1.0
+
+# Manual XZ position offset (mét) sau khi auto-recenter — bù pivot lệch hoặc
+# anim shifted. Y giữ 0 (bottom on ground). Chỉ thêm khi cần.
+const DUAL_MODEL_OFFSET : Dictionary = {
+	# vd: "bulldozer": Vector3(-0.1, 0.0, 0.0),
+}
 
 # Active model pair (whichever enemy_type loaded). Swap visibility theo walking.
 var _model_base_inst : Node3D = null
@@ -300,11 +354,20 @@ func _spawn_dual_variant(scene: PackedScene, node_name: String, visible: bool) -
 				enemy_type, DUAL_MODEL_TARGET_HEIGHT_DEFAULT))
 		var s : float = target_h / bbox.size.y
 		inst.scale = Vector3(s, s, s)
-		# Re-measure để recenter bottom-center về inst origin.
+		# Re-measure để recenter bottom-center về inst origin (XZ về (0,0),
+		# bottom Y về 0). Chỉ chỉnh XZ để giữ chân enemy chạm GROUND_Y.
 		var bbox2 : AABB = _measure_node_aabb(inst)
 		var bc : Vector3 = bbox2.position + Vector3(
 				bbox2.size.x * 0.5, 0.0, bbox2.size.z * 0.5)
 		inst.position -= bc
+		# Manual offset per-type cho model có pivot/anim lệch (vd Bull).
+		var off : Vector3 = DUAL_MODEL_OFFSET.get(enemy_type, Vector3.ZERO)
+		if off != Vector3.ZERO:
+			inst.position += off
+		print("[%s] %s scale=%.3fx, raw_size.y=%.4f, bbox.x=[%.2f,%.2f] z=[%.2f,%.2f]" \
+				% [enemy_type, node_name, s, bbox.size.y,
+				   bbox2.position.x, bbox2.position.x + bbox2.size.x,
+				   bbox2.position.z, bbox2.position.z + bbox2.size.z])
 	return inst
 
 func _find_animation_player(node: Node) -> AnimationPlayer:

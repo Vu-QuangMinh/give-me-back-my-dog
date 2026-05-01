@@ -6,7 +6,7 @@ class_name HexTile
 #  Đáy ở Y=0, mặt trên ở Y=TILE_HEIGHT.
 # ═══════════════════════════════════════════════
 
-enum Type { NORMAL, COLUMN, FIRE_PIT, GRASS }
+enum Type { NORMAL, COLUMN, FIRE_PIT, GRASS, CEMENT, ASPHALT }
 
 const HEX_SIZE        : float = 1.0     # khớp với main.gd
 const TILE_HEIGHT     : float = 0.2
@@ -24,7 +24,7 @@ const COLOR_FIRE_PIT = Color(0.68, 0.32, 0.10)   # cam-đỏ — fire pit
 const COLOR_LADDER   = Color(0.45, 0.55, 0.20)   # ô-liu
 const COLOR_MAGE_AIM = Color(0.92, 0.50, 0.10)   # cam — mage aim aura
 
-# Tint nhân với grass texture (giữ nét grass nhưng vẫn highlight được state).
+# Tint nhân với grass/cement/asphalt texture (giữ nét texture nhưng vẫn highlight state).
 const COLOR_GRASS_NORMAL   = Color(1.00, 1.00, 1.00)
 const COLOR_GRASS_HOVER    = Color(1.20, 1.10, 0.85)
 const COLOR_GRASS_SELECTED = Color(0.65, 1.40, 1.20)
@@ -45,8 +45,10 @@ var column_mesh  : MeshInstance3D     = null
 var outline_mesh : MeshInstance3D     = null
 var coord_label  : Label3D            = null
 
-# Static cache: tất cả tile GRASS share 1 ImageTexture (đỡ 96 lần build).
-static var _grass_texture : ImageTexture = null
+# Static cache: tất cả tile cùng type share 1 ImageTexture (đỡ build N lần).
+static var _grass_texture   : ImageTexture = null
+static var _cement_texture  : ImageTexture = null
+static var _asphalt_texture : ImageTexture = null
 
 func _ready() -> void:
 	if mesh_inst == null:
@@ -89,12 +91,14 @@ func setup(col: int, row: int, t: Type = Type.NORMAL) -> void:
 		_build_coord_label()
 	else:
 		coord_label.text = _format_coord(grid_col, grid_row)
-	# GRASS: gắn texture cỏ procedural; type khác: clear texture nếu có.
+	# Texture-based types (GRASS/CEMENT/ASPHALT): gắn procedural texture.
+	# Type khác: clear texture.
 	if material:
-		if t == Type.GRASS:
-			material.albedo_texture = _build_grass_texture()
-		else:
-			material.albedo_texture = null
+		match t:
+			Type.GRASS:   material.albedo_texture = _build_grass_texture()
+			Type.CEMENT:  material.albedo_texture = _build_cement_texture()
+			Type.ASPHALT: material.albedo_texture = _build_asphalt_texture()
+			_:            material.albedo_texture = null
 	_apply_base_color()
 	if t == Type.COLUMN and column_mesh == null:
 		_build_column_pillar()
@@ -201,6 +205,44 @@ static func _build_grass_texture() -> ImageTexture:
 	_grass_texture = ImageTexture.create_from_image(img)
 	return _grass_texture
 
+# Procedural cement / sidewalk — light grey với speckle nhẹ.
+static func _build_cement_texture() -> ImageTexture:
+	if _cement_texture != null: return _cement_texture
+	var size : int = 64
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_VALUE
+	noise.frequency  = 0.35
+	noise.seed = 11
+	var img : Image = Image.create(size, size, false, Image.FORMAT_RGB8)
+	for y in size:
+		for x in size:
+			var v : float = clampf((noise.get_noise_2d(float(x), float(y)) + 1.0) * 0.5, 0.0, 1.0)
+			# Light grey base 0.62 + variation ±0.10 + speckle.
+			var spec : float = (randf() - 0.5) * 0.04
+			var c : float = 0.55 + v * 0.15 + spec
+			img.set_pixel(x, y, Color(c, c, c))
+	_cement_texture = ImageTexture.create_from_image(img)
+	return _cement_texture
+
+# Procedural asphalt / mặt đường — dark grey với pebble noise.
+static func _build_asphalt_texture() -> ImageTexture:
+	if _asphalt_texture != null: return _asphalt_texture
+	var size : int = 64
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_PERLIN
+	noise.frequency  = 0.6
+	noise.seed = 23
+	var img : Image = Image.create(size, size, false, Image.FORMAT_RGB8)
+	for y in size:
+		for x in size:
+			var v : float = clampf((noise.get_noise_2d(float(x), float(y)) + 1.0) * 0.5, 0.0, 1.0)
+			# Dark grey base 0.22 + small variation + pebble speckle.
+			var spec : float = (randf() - 0.5) * 0.06
+			var c : float = 0.18 + v * 0.10 + spec
+			img.set_pixel(x, y, Color(c, c, c))
+	_asphalt_texture = ImageTexture.create_from_image(img)
+	return _asphalt_texture
+
 func _apply_base_color() -> void:
 	if material == null: return
 	match tile_type:
@@ -208,6 +250,8 @@ func _apply_base_color() -> void:
 		Type.COLUMN:   material.albedo_color = COLOR_COLUMN
 		Type.FIRE_PIT: material.albedo_color = COLOR_FIRE_PIT
 		Type.GRASS:    material.albedo_color = COLOR_GRASS_NORMAL
+		Type.CEMENT:   material.albedo_color = COLOR_GRASS_NORMAL    # tint trắng → texture pure
+		Type.ASPHALT:  material.albedo_color = COLOR_GRASS_NORMAL
 
 # ═══════════════════════════════════════════════
 #  STATE — main.gd gọi mỗi khi cần update màu
@@ -219,8 +263,9 @@ func set_state(state: String) -> void:
 		_apply_base_color()
 		return
 	if material == null: return
-	# GRASS: tint nhẹ multiplicative để giữ texture cỏ rõ nét.
-	if tile_type == Type.GRASS:
+	# Texture types (GRASS/CEMENT/ASPHALT): tint nhẹ multiplicative để giữ
+	# texture rõ nét; same tint dictionary works on bất kỳ base color.
+	if tile_type == Type.GRASS or tile_type == Type.CEMENT or tile_type == Type.ASPHALT:
 		match state:
 			"normal":   material.albedo_color = COLOR_GRASS_NORMAL
 			"hover":    material.albedo_color = COLOR_GRASS_HOVER
