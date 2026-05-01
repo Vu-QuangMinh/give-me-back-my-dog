@@ -5,7 +5,7 @@ class_name Enemy
 #  BEHAVIOR ENUM
 # ═══════════════════════════════════════════════════════════════════
 
-enum Behavior { AGGRESSIVE, RANGER, DUMMY, BULLDOZER }
+enum Behavior { AGGRESSIVE, RANGER, DUMMY, BULLDOZER, DASHER, GUARDIAN_GORILLA }
 
 # ═══════════════════════════════════════════════════════════════════
 #  ENEMY PRESETS
@@ -200,6 +200,78 @@ const ENEMY_PRESETS : Dictionary = {
 		"range_max":        0,
 		"attacks":          [],
 	},
+	"dasher": {
+		"enemy_type":       "dasher",
+		"display_label":    "D",
+		"max_hp":           7,
+		"actions_per_turn": 2,
+		"move_range":       0,
+		"body_color":       Color(0.20, 0.70, 1.00),
+		"behavior":         Behavior.DASHER,
+		"immovable":        false,
+		"range_min":        4,
+		"range_max":        6,
+		"attacks": [
+			# A1 — Triple Shot (fast, 0.2s interval)
+			{ "range": 6, "damage": 1, "aoe": 1, "hits": 3, "speed": "fast",
+			  "perfect_window": 0.0, "ok_window": 0.0,
+			  "dual_bar": false, "speed_mults": [], "hit_interval": 0.2 },
+			# A2 — Barrage (slow, 0.1s interval)
+			{ "range": 6, "damage": 1, "aoe": 1, "hits": 5, "speed": "slow",
+			  "perfect_window": 0.0, "ok_window": 0.0,
+			  "dual_bar": false, "speed_mults": [], "hit_interval": 0.1 },
+			# A3 — Adjacency Slam (handled via "adjacency_slam" action in main.gd)
+			{ "range": 1, "damage": 1, "aoe": 2, "hits": 1, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [],
+			  "adjacency_slam": true, "stun_on_miss": true },
+			# A4 — Dash Combo (handled via "dash_combo" action in main.gd)
+			{ "range": 1, "damage": 1, "aoe": 1, "hits": 3, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [0.70, 1.00, 1.50] },
+		],
+	},
+	"guardian_gorilla": {
+		"enemy_type":       "guardian_gorilla",
+		"display_label":    "G",
+		"max_hp":           5,
+		"actions_per_turn": 2,
+		"move_range":       2,
+		"body_color":       Color(0.60, 0.70, 0.85),
+		"behavior":         Behavior.GUARDIAN_GORILLA,
+		"immovable":        false,
+		"range_min":        0,
+		"range_max":        0,
+		"attacks": [
+			# A1 — Shield Slam: front arc, 0 dmg, stun on miss, shared SPACE
+			{ "range": 1, "damage": 0, "aoe": 1, "hits": 1, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [],
+			  "guard_slam": true },
+			# A2 — Triple Strike: 3 escalating bars, 1 dmg each, all always fire
+			{ "range": 1, "damage": 1, "aoe": 1, "hits": 3, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [0.70, 1.00, 1.50] },
+		],
+	},
+	"boxing_bear": {
+		"enemy_type":       "boxing_bear",
+		"display_label":    "R",
+		"max_hp":           5,
+		"actions_per_turn": 1,
+		"move_range":       2,
+		"body_color":       Color(0.85, 0.40, 0.10),
+		"behavior":         Behavior.AGGRESSIVE,
+		"immovable":        false,
+		"range_min":        0,
+		"range_max":        0,
+		"attacks": [
+			{ "range": 1, "damage": 1, "aoe": 1, "hits": 5, "speed": "",
+			  "perfect_window": 0.20, "ok_window": 0.40,
+			  "dual_bar": false, "speed_mults": [],
+			  "boxing_bear_combo": true, "max_chain": 5, "chain_speed_mult": 1.5 },
+		],
+	},
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -244,6 +316,10 @@ var pending_eruption       : bool  = false  # mage: eruption queued from last tu
 var eruption_attack_idx    : int   = 0      # mage: index into attacks[] that was aimed
 var eruption_target_col    : int   = -1     # mage: hex col locked at aim time
 var eruption_target_row    : int   = -1     # mage: hex row locked at aim time
+var stun_turns             : int   = 0      # turns remaining to skip (1 = skip 1 full turn)
+var dash_attack_index      : int   = 0      # dasher: alternates A1 (0) and A2 (1) each ranged volley
+var guard_facing           : int   = 0      # guardian_gorilla: index into CUBE_DIR_VECS for shield direction
+var guard_attack_index     : int   = 0      # guardian_gorilla: cycles A1/A2 when not forced A1
 
 # ═══════════════════════════════════════════════════════════════════
 #  3D NODES (từ scene)
@@ -458,6 +534,9 @@ func plan_action(player_col: int, player_row: int,
 				if dist <= 1:
 					attack_index = 1
 					return "attack"
+			elif enemy_type == "boxing_bear":
+				if dist <= 1:
+					return "boxing_bear_combo"
 			else:
 				if dist <= atk_range:
 					return "attack"
@@ -476,6 +555,10 @@ func plan_action(player_col: int, player_row: int,
 					return "move_away"
 				if dist <= atk_range:
 					return "attack"
+		Behavior.DASHER:
+			return "dasher_turn"
+		Behavior.GUARDIAN_GORILLA:
+			return "guardian_gorilla_turn"
 	return "move"
 
 func best_move_toward(player_col: int, player_row: int,

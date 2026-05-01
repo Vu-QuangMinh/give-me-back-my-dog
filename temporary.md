@@ -1,3 +1,73 @@
+## 2026-05-01 — Guardian Gorilla enemy
+
+**Changes (hextile.gd)**:
+- Added `COLOR_GUARD_ARC` (silver-blue) and `"guard_arc"` tile state.
+
+**Changes (enemy.gd)**:
+- Added `GUARDIAN_GORILLA` to `Behavior` enum.
+- Added `guard_facing: int = 0` and `guard_attack_index: int = 0` runtime state.
+- Added `"guardian_gorilla"` preset: HP 5, 2 actions, move 2, silver-blue, `Behavior.GUARDIAN_GORILLA`. Attacks: A1 Shield Slam (front arc, 0 dmg, stun on miss, shared SPACE), A2 Triple Strike (3 bars 0.7×/1.0×/1.5×, 1 dmg each, all always fire).
+- `plan_action()`: `Behavior.GUARDIAN_GORILLA` always returns `"guardian_gorilla_turn"`.
+
+**Changes (main.gd)**:
+- Added `GUARD_ARC` constant — for each of 6 facing directions, the 3 arc direction indices forming the 180° front arc.
+- Added `_guard_update_facing(enemy)` — snaps guard facing to best cube direction toward nearest player.
+- Added `_guard_arc_hexes(enemy)` — returns the 3 in-grid front arc hex positions.
+- Added `_guard_is_shielded_from(enemy, src_col, src_row)` — direction-based front arc check (for melee/push).
+- Added `_guard_proj_from_front(enemy, proj)` — checks projectile incoming direction vs front arc (using world XZ neighbor positions).
+- Added `_guard_refresh_arc_hexes()` — paints front arc hexes blue; called at end of `_refresh_tile_colors()`.
+- Modified `_handle_enemy_proj_hit`: front-arc projectiles are redirected toward nearest player (god-owned, neg_bounce × 0.5), no damage to guard.
+- Modified `_push_enemy`: push from front arc is cancelled (push immunity).
+- Modified `_player_attack_enemy`: melee from front arc deals −1 damage (min 0).
+- Added `_guard_slam_async(enemy)` — A1: shared SPACE for all players in arc hexes; 0 dmg; stun on miss.
+- Added `_guard_triple_strike_async(enemy, target_idx)` — A2: 3 sequential bars identical to Dasher combo.
+- Added `_guard_attack_once(enemy)` — selects A1 if both players adjacent, else alternates via `guard_attack_index`.
+- Added `_guardian_gorilla_turn_async(enemy)` — full turn: if adjacent: attack + reposition; else: move + update facing + attack if now adjacent or d≤2.
+- Added `"guardian_gorilla_turn"` match case → `await _guardian_gorilla_turn_async(enemy); return`.
+
+---
+
+## 2026-05-01 — Dasher enemy
+
+**Changes (enemy.gd)**:
+- Added `DASHER` to `Behavior` enum.
+- Added `"dasher"` preset: HP 7, 2 actions, no standard movement (`move_range=0`), electric blue, `Behavior.DASHER`. Attacks: A1 Triple Shot (range 6, fast, 3 hits, 0.2s interval), A2 Barrage (range 6, slow, 5 hits, 0.1s interval), A3 Adjacency Slam (range 1, stun on miss), A4 Dash Combo (range 1, 3 bars at 0.7×/1.0×/1.5×).
+- Added `dash_attack_index: int = 0` runtime state (alternates A1/A2 each ranged volley).
+- `plan_action()`: `Behavior.DASHER` always returns `"dasher_turn"`.
+
+**Changes (main.gd)**:
+- Added `CUBE_DIR_VECS` constant — 6 cube-coordinate unit directions for straight-line hex walks.
+- Added `_is_dash_path_blocked(pos, exclude_enemy)` — impassable tile or occupied entity check.
+- Added `_dasher_best_dash_dest(enemy, max_range, mode, target_col, target_row)` — scores all 6 directions (stops at first obstacle), picks best landing hex per mode: `"band"` (prefer d=5–6 from target), `"approach"` (minimize d), `"flee"` (maximize min-d from all players). Tie-break: greatest travel distance.
+- Added `_dasher_do_dash(enemy, dest)` — updates grid position, smooth animation, fire-pit check.
+- Added `_dasher_ranged_volley_async(enemy, target_idx)` — fires A1 or A2 projectiles sequentially with per-attack interval; toggles `dash_attack_index` after firing.
+- Added `_dasher_adjacency_slam_async(enemy)` — one shared DodgeBar for all adjacent players; miss → `stun_turns=1` per affected player.
+- Added `_dasher_combo_async(enemy, target_idx)` — 3 sequential DodgeBars at 0.7×/1.0×/1.5× speed; all 3 always fire regardless of result.
+- Added `_dasher_find_min_adjacent_dash(enemy, target_col, target_row, max_range)` — walks all 6 directions to find the fewest-step dash that lands adjacent to target; returns `(-1,-1)` if unreachable.
+- Added `_dasher_turn_async(enemy)` — full 2-action turn coroutine per new design spec: d>6: band-dash+volley; d=4–6: volley+reposition-dash(max 3); d=2–3: pre-check adjacency reachability (if reachable: min-step dash+combo; else: band-dash+volley); d=1: slam+flee-dash(max 5).
+- Added `"dasher_turn"` match case → `await _dasher_turn_async(enemy); return`.
+
+---
+
+## 2026-04-30 — Boxing Bear (Boxing Bear) + universal Stun
+
+**Changes (enemy.gd)**:
+- Added `"boxing_bear"` preset: HP 5, 1 action, move 2, AGGRESSIVE, dark orange. Attack dict has `boxing_bear_combo: true`, `max_chain: 5`, `chain_speed_mult: 1.5`.
+- Added `stun_turns: int = 0` runtime state (universal stun, 1 = skip 1 full turn).
+- `plan_action()` AGGRESSIVE branch: new `elif enemy_type == "boxing_bear"` — returns `"boxing_bear_combo"` when adjacent (dist ≤ 1), else falls through to "move".
+
+**Changes (Player.gd)**:
+- Added `var stun_turns: int = 0`.
+
+**Changes (main.gd)**:
+- `_run_enemy_actions()`: after `tick_turn()`, checks `enemy.stun_turns > 0` — decrements, shows "STUNNED" popup, returns early (skips all actions).
+- Added `"boxing_bear_combo"` match case → `await _boxing_bear_combo_async(enemy, target_idx)`.
+- Added `_boxing_bear_combo_async(enemy, target_idx)`: spawns up to 5 sequential DodgeBars at `speed_mult 1.5` with the same `dodge_line`. Chain breaks on first hit (1 dmg). All 5 dodged → `enemy.stun_turns = 1` + "STUNNED!" popup.
+- Added `_maybe_skip_stunned_current_player()`: if current player's `stun_turns > 0`, decrements, shows "STUNNED" popup, calls `_end_player_turn()`.
+- Called `_maybe_skip_stunned_current_player()` at: start of player turn (after enemy turn ends) and end of `_end_player_turn()` when switching to next player.
+
+---
+
 ## 2026-04-29 — Mage enemy wired up (aim + eruption cycle)
 
 **Changes (enemy.gd)**:
